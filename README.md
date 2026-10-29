@@ -70,19 +70,22 @@ NaviRoute is based on the **Ride-Engine** project: <https://github.com/sasimohit
 | **Apache Kafka** | Event-driven communication between modules |
 | **WebSocket (STOMP over SockJS)** | Real-time push notifications to riders/drivers |
 | **CompletableFuture + @Async** | Asynchronous driver matching |
-| **Flyway** | Versioned database migrations (V1–V11) |
+| **Flyway** | Versioned database migrations (V1–V13) |
 | **Prometheus + Grafana** | Metrics collection and monitoring dashboards |
 | **Docker + Docker Compose** | Containerized local infrastructure |
 | **Maven** | Build and dependency management |
-| **JUnit 5 + Mockito, embedded PostgreSQL/Kafka/Redis** | Unit and integration tests (205 tests) |
+| **JUnit 5 + Mockito, embedded PostgreSQL/Kafka/Redis** | Unit and integration tests (254 tests) |
 
 ## Modules
 
 ### 1. Auth Module
 - User registration (Rider / Driver) with BCrypt password hashing
-- JWT-based stateless authentication — login/register return an access token and a refresh token (there is **no** token-refresh endpoint yet)
+- JWT-based stateless authentication: login/register return an access token (15 min) and a refresh token (7 days). Each token carries a signed `type` claim. Only access tokens authenticate API calls, and only refresh tokens are accepted by `POST /api/auth/refresh`
+- No built-in signing key: `JWT_SECRET` is required in `prod` (at least 32 bytes; values published in this repository are rejected)
+- Every authenticated request checks that the account is still active, so suspending a user revokes tokens issued before the suspension
+- Email identity is case-insensitive (stored lower-case, unique by `LOWER(email)`). Login failures return one generic 401, whether the email is unknown or the password is wrong
 - Admin self-registration blocked; an administrator is created from configuration at startup (`NAVIROUTE_ADMIN_EMAIL` / `NAVIROUTE_ADMIN_PASSWORD`, no default password)
-- Spring Security filter chain; role checks enforced for `/api/admin/**` and payment refunds
+- Spring Security filter chain; role checks enforced for `/api/admin/**`, payment refunds and fare-cache invalidation
 
 ### 2. Driver Module
 - Vehicle registration with duplicate plate number prevention
@@ -159,8 +162,8 @@ NaviRoute is based on the **Ride-Engine** project: <https://github.com/sasimohit
 │   └── shared/       # kafka, redis, async, exceptions, dto, enums
 ├── src/main/resources/
 │   ├── application.yml, application-dev.yml, application-prod.yml
-│   └── db/migration/V1__…V11__*.sql
-├── src/test/java/com/ridesharing/           # 191 unit + 14 integration tests
+│   └── db/migration/V1__…V13__*.sql
+├── src/test/java/com/ridesharing/           # 218 unit + 36 integration tests
 ├── docker-compose.yml                       # Local infrastructure
 ├── Dockerfile                               # Multi-stage build
 ├── .env.example                             # Environment variable reference (placeholders only)
@@ -177,7 +180,8 @@ NaviRoute is based on the **Ride-Engine** project: <https://github.com/sasimohit
 | Method | Endpoint | Access | Description |
 |--------|----------|--------|-------------|
 | POST | `/api/auth/register` | Public | Register rider/driver |
-| POST | `/api/auth/login` | Public | Login, get JWT tokens |
+| POST | `/api/auth/login` | Public | Login, get JWT tokens (generic 401 on any credential failure) |
+| POST | `/api/auth/refresh` | Public (refresh token in body) | Exchange `{refreshToken}` for a new token pair; access tokens are rejected (401) |
 
 ### Driver
 | Method | Endpoint | Access | Description |
@@ -204,7 +208,7 @@ NaviRoute is based on the **Ride-Engine** project: <https://github.com/sasimohit
 |--------|----------|--------|-------------|
 | POST | `/api/pricing/estimate` | Authenticated | Get fare estimate |
 | GET | `/api/pricing/fare-rules` | Authenticated | List active fare rules |
-| DELETE | `/api/pricing/cache/{type}` | Authenticated (intended for admins; not yet enforced) | Invalidate fare cache |
+| DELETE | `/api/pricing/cache/{type}` | Admin | Invalidate fare cache |
 
 ### Rides
 | Method | Endpoint | Access | Description |
@@ -277,6 +281,8 @@ cd <repository-directory>
 #    To get an administrator account, set NAVIROUTE_ADMIN_EMAIL and
 #    NAVIROUTE_ADMIN_PASSWORD (at least 12 characters) before starting the app.
 #    There is no default admin password.
+#    JWT_SECRET: optional for local dev (a random per-process key is used and tokens
+#    stop working on restart); REQUIRED in prod (min 32 bytes, e.g. `openssl rand -base64 48`).
 
 # 3. Start infrastructure (PostgreSQL, Redis, Zookeeper, Kafka, Prometheus, Grafana)
 docker compose up -d
@@ -284,6 +290,9 @@ docker compose up -d
 # 4. Run the application (dev profile by default)
 export NAVIROUTE_ADMIN_EMAIL=admin@example.com
 export NAVIROUTE_ADMIN_PASSWORD='<choose-a-strong-password>'
+export JWT_SECRET="$(openssl rand -base64 48)"          # optional in dev, required in prod
+export NAVIROUTE_METRICS_USERNAME=prometheus             # only needed for the Prometheus container
+export NAVIROUTE_METRICS_PASSWORD="$(cat monitoring/secrets/metrics-password)"
 mvn spring-boot:run
 
 # 5. Verify
@@ -316,28 +325,43 @@ See [SETUP-AND-TESTING-GUIDE.md](SETUP-AND-TESTING-GUIDE.md) for the complete ma
 
 ## Testing
 
-`mvn verify` runs 205 tests:
+`mvn verify` runs 254 tests:
 
 ```
-191 unit tests (JUnit 5 + Mockito; repositories, Kafka and Redis mocked)
+218 unit tests (JUnit 5 + Mockito; repositories, Kafka and Redis mocked)
 ├── Shared Infrastructure (incl. Redis serializer round-trip with the real serializer)
-├── Auth Module (incl. admin bootstrap)
+├── Auth Module (incl. admin bootstrap, JWT token types and signing-key validation)
 ├── Driver, Pricing, Admin, Ride, Notification, Payment, Rating modules
 └── Service-level flow test (e2e/RideSharingE2ETest — Mockito, no running infrastructure)
 
-14 integration tests (full Spring context + HTTP, real infrastructure processes)
-├── AdminAndDriverApprovalIntegrationTest — migrations V1–V11, admin login, pending/reject/re-approve
+36 integration tests (full Spring context + HTTP, real infrastructure processes)
+├── AdminAndDriverApprovalIntegrationTest — migrations V1–V13, admin login, pending/reject/re-approve
+├── AuthSecurityIntegrationTest           — token types, refresh endpoint, suspension revokes tokens,
+│                                           case-insensitive email, generic login errors, concurrent registration
+├── EndpointAccessIntegrationTest         — fare-cache authorization, Actuator health/metrics/Prometheus access
 ├── RideLifecycleIntegrationTest          — request → match → start → complete → Kafka → payment → rating,
 │                                           Redis fare-rule cache, vehicle-type matching, duplicate events
-└── MatchingConcurrencyIntegrationTest    — concurrent assignment, cancellation vs. matching (row locks),
-                                            after-commit event publishing
+├── MatchingConcurrencyIntegrationTest    — concurrent assignment, cancellation vs. matching (row locks),
+│                                           after-commit event publishing
+└── RideStateHardeningIntegrationTest     — concurrent ride requests, one active ride per rider/driver,
+                                            availability vs. assignment locking, driver re-entry into the pool
 ```
 
-The integration tests start **embedded PostgreSQL 14** (via `io.zonky.test:embedded-postgres`), an **embedded Kafka** broker (`spring-kafka-test`), and an **embedded Redis 5.0.14** server (`com.github.codemonstur:embedded-redis`). The database and Redis binaries are downloaded as Maven test dependencies, so Docker is not required. The integration tests do not cover WebSocket delivery or the Docker Compose stack.
+The integration tests start **embedded PostgreSQL 14** (via `io.zonky.test:embedded-postgres`), an **embedded Kafka** broker (`spring-kafka-test`), and an **embedded Redis 5.0.14** server (`com.github.codemonstur:embedded-redis`). The database and Redis binaries are downloaded as Maven test dependencies, so Docker is not required.
+
+They do not cover WebSocket delivery, the Docker Compose stack, or network-level restrictions. The Spring Redis *health indicator* is disabled in the integration tests, because it cannot parse the `INFO` output of the embedded Windows Redis build; Redis itself is used for real.
 
 ## Database Schema
 
-11 Flyway migrations. V1–V9 create the schema and seed data; V10 backfills driver approval status, and V11 deactivates the unusable V7 seed admin. The tables:
+13 Flyway migrations:
+- V1–V9 create the schema and seed data.
+- V10 backfills driver approval status, and V11 deactivates the unusable V7 seed admin.
+- V12 adds partial unique indexes: at most one active ride per rider and per driver.
+- V13 adds a unique index on `LOWER(email)`.
+
+V12 and V13 **stop with an explicit error** if existing data violates them (duplicate active rides, or emails that differ only by case). Nothing is merged or rewritten automatically; each file's header contains the detection query.
+
+The tables:
 - `users` — riders, drivers, admins with roles and ratings
 - `vehicles` — driver vehicles (type, plate, model, color)
 - `driver_documents` — document type + URL
@@ -358,7 +382,29 @@ The integration tests start **embedded PostgreSQL 14** (via `io.zonky.test:embed
 
 ## Monitoring
 
-- **Prometheus** scrapes `/actuator/prometheus` every 15 seconds (job `naviroute`)
+- **Prometheus** scrapes `/actuator/prometheus` every 15 seconds (job `naviroute`), using HTTP Basic auth
+
+Actuator access:
+
+| Endpoint | Access |
+|---|---|
+| `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness` | Public (status only; component details only for ADMIN) |
+| `/actuator/prometheus` | Metrics scrape user (HTTP Basic) or ADMIN token |
+| `/actuator/metrics`, `/actuator/info`, `/actuator` | ADMIN token |
+| Anything else under `/actuator` | Not exposed (404) |
+
+The scrape user (`NAVIROUTE_METRICS_USERNAME` / `NAVIROUTE_METRICS_PASSWORD`, no default) can read only `/actuator/prometheus` and cannot call the API. If it is not configured, only ADMIN tokens can read metrics, so the Compose Prometheus cannot scrape.
+
+To set up local scraping with Docker Compose:
+
+```bash
+mkdir -p monitoring/secrets                                         # git-ignored
+openssl rand -base64 24 | tr -d '\n' > monitoring/secrets/metrics-password
+export NAVIROUTE_METRICS_USERNAME=prometheus                        # must match monitoring/prometheus.yml
+export NAVIROUTE_METRICS_PASSWORD="$(cat monitoring/secrets/metrics-password)"
+```
+
+In production, also restrict `/actuator` at the network level (for example, do not route it through the public load balancer). That cannot be enforced or tested by the application.
 - **Grafana** dashboard "NaviRoute - Overview" (folder "NaviRoute") includes HTTP request rate, p95 response time, JVM memory, active threads, DB connection pool, HTTP error rate, and GC pause time
 
 ## Known Limitations
@@ -376,30 +422,40 @@ These were found by running the application, and are now covered by regression t
 - New drivers had no `PENDING` status. Registration now sets it, and V10 backfills existing drivers.
 - Matching ignored the requested vehicle type, and could resurrect a cancelled ride or double-assign a driver under concurrency.
 - Rejected-then-approved drivers could not log in.
+- Security hardening:
+  - Refresh tokens worked as access tokens.
+  - Tokens of suspended users kept working.
+  - Any user could clear the fare cache.
+  - Actuator metrics and health details were public.
+  - Login revealed whether an email existed, and case-variant emails could register twice.
+  - A known fallback JWT key was used when `JWT_SECRET` was unset.
+- Ride state:
+  - Concurrent requests could create two active rides for one rider.
+  - A driver could switch `ONLINE` during an assigned ride.
+  - Drivers rejoined the matching pool only after another location update.
+- Unknown paths (including unexposed Actuator endpoints) returned HTTP 500 instead of 404.
 
 ### Remaining functional risks
 
 - **Event delivery is not durable.** Kafka events are sent after the database commit, so a rolled-back change is never announced. But if the broker is unreachable at that moment, the event is lost: there is no transactional outbox. A lost `ride-completed` means no payment record is created for that ride.
 - **Duplicate events.** A redelivered `ride-completed` does not create a second payment, but the WebSocket notification is sent again.
-- **Driver location after a ride.** A driver becomes `ONLINE` after completing or cancelling a ride, but rejoins the matching pool only on their next location update.
-- **Manual availability.** A driver can set themselves `ONLINE` through the availability endpoint while still on an active ride. Matching skips drivers with an active ride, but this check is not atomic with the driver claim.
+- **Suspending or rejecting a driver during a ride** revokes their tokens immediately, so they cannot start or complete that ride. A rider can cancel only before the ride starts, and there is no admin endpoint to close an `IN_PROGRESS` ride.
+- **Driver re-entry after cancellation** uses the driver's last reported position. If none is known, the driver rejoins on their next location update.
 - **Vehicle types are free text.** Matching compares the driver's registered vehicle type with the requested type (case-insensitive). A driver registered as `CAR` never matches `SEDAN` or `SUV` requests.
 
 ### Security issues (do not deploy publicly until fixed)
 
-- **Fallback JWT signing key.** If `JWT_SECRET` is unset, a built-in default key is used, including in the `prod` profile.
-- **Refresh tokens are accepted as access tokens** (confirmed).
-- **Suspended users' existing tokens remain valid** until they expire (confirmed).
-- **Fare-cache invalidation is not restricted.** Any authenticated user can call `DELETE /api/pricing/cache/{type}` (confirmed).
-- **Actuator endpoints are public**, including `/actuator/metrics` (confirmed) and detailed health output.
 - **WebSocket subscriptions are unauthenticated**, so any client can subscribe to other users' ride topics.
+- **No rate limiting** on login, registration, or any other endpoint.
+- **Refresh tokens are not rotated or revocable individually.** A refreshed token pair does not invalidate the previous refresh token; it stays usable until it expires, unless the account is suspended.
+- **Unauthenticated requests receive 403**, not 401. There is no authentication entry point; the status codes are unchanged from the original project.
 - **Default admin account from migration V7.** It is deactivated by V11 if its password was never changed. A deployment where it was changed keeps it active.
-- **Account enumeration.** Login reports whether an email is registered, and emails differing only by letter case can be registered separately.
+- **Default profile is `dev`.** A deployment that does not set `SPRING_PROFILES_ACTIVE=prod` runs with the dev profile, which (among other things) starts without `JWT_SECRET` using a random per-process key.
+- **Grafana uses `admin`/`admin`** in `docker-compose.yml`.
 
 ### Not implemented or simulated
 
 - **Payments are simulated**: there is no payment gateway, and pay/refund only change status.
-- **No token refresh endpoint**: refresh tokens are issued but cannot be exchanged.
 - **No driver accept/decline**: matching auto-assigns drivers.
 - **No routing/maps integration**: distance is straight-line (Haversine), time assumes a fixed average speed, and the final fare equals the estimate.
 - **Documents** are stored as URLs only; there is no file upload or storage.

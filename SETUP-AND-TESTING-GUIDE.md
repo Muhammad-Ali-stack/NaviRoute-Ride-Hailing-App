@@ -115,20 +115,31 @@ docker exec -it naviroute-kafka kafka-topics --bootstrap-server localhost:9092 -
 → May be empty initially (topics are auto-created when the app starts)
 
 ### 3.4 Start the Spring Boot Application
-Set the administrator credentials first. There is no default admin password; the password must be at least 12 characters:
+Set the administrator credentials first. There is no default admin password; the password must be at least 12 characters.
+
+`JWT_SECRET` is optional for local development. If it is unset, the app signs tokens with a random per-process key and logs a warning, so tokens stop working whenever you restart the app. Set it for stable sessions. It is **required** with the `prod` profile.
+
+The Prometheus scrape user is only needed if you want the Prometheus container to collect metrics (see TEST 10).
+
 ```powershell
 cd <path-to-your-naviroute-checkout>
 $env:NAVIROUTE_ADMIN_EMAIL = "admin@example.com"
 $env:NAVIROUTE_ADMIN_PASSWORD = "<choose-a-strong-password>"
+$env:JWT_SECRET = "<random value, at least 32 characters>"
+# Optional, for Prometheus scraping (must match monitoring/secrets/metrics-password):
+$env:NAVIROUTE_METRICS_USERNAME = "prometheus"
+$env:NAVIROUTE_METRICS_PASSWORD = "<same value as in monitoring/secrets/metrics-password>"
 mvn spring-boot:run
 ```
 Wait until you see: `Started RideSharingApplication in X seconds`
 
-Flyway automatically applies migrations V1 through V11. On startup the log shows `Admin bootstrap: created administrator account ...` the first time. On later startups, existing credentials are left unchanged.
+Flyway automatically applies migrations V1 through V13. On startup the log shows `Admin bootstrap: created administrator account ...` the first time. On later startups, existing credentials are left unchanged.
+
+If an **existing** local database already holds data that violates the V12/V13 rules (a rider or driver with two active rides, or two accounts whose emails differ only by case), startup stops with an explicit Flyway error. See the header of the migration file for the query that lists the conflicting rows.
 
 ### 3.5 Verify App is Running
 Open browser: http://localhost:8080/actuator/health
-→ Should show `{"status":"UP"}`
+→ Should show `{"status":"UP"}` (component details are shown only to admins)
 
 ---
 
@@ -203,7 +214,13 @@ $ADMIN_TOKEN = "paste-the-accessToken-here"
 ```powershell
 API POST "http://localhost:8080/api/auth/login" '{"email":"arun@test.com","password":"WRONG"}'
 ```
-→ Expected: 401 Unauthorized
+→ Expected: 401 Unauthorized — "Invalid email or password". An unknown email returns the identical response, so login does not reveal which emails are registered. Emails are case-insensitive: `ARUN@test.com` logs in to the same account.
+
+#### 1f. Refresh tokens
+```powershell
+API POST "http://localhost:8080/api/auth/refresh" '{"refreshToken":"paste-the-refreshToken-here"}'
+```
+→ Returns a new token pair. Using an **access** token here returns 401, and using a **refresh** token as `Authorization: Bearer ...` on any API call returns 403.
 
 ---
 
@@ -429,9 +446,23 @@ API GET "http://localhost:8080/api/ratings/average/2" $null $RIDER_TOKEN
 
 ### TEST 10: MONITORING
 
+Metrics are no longer public. `/actuator/prometheus` needs the scrape user (HTTP Basic) or an ADMIN token, and `/actuator/metrics` needs an ADMIN token. Only `/actuator/health` is public.
+
+For the Prometheus container to scrape the app, do this before starting the app:
+```powershell
+New-Item -ItemType Directory -Force monitoring\secrets | Out-Null     # git-ignored folder
+$pw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
+Set-Content -NoNewline -Encoding ascii monitoring\secrets\metrics-password $pw
+$env:NAVIROUTE_METRICS_USERNAME = "prometheus"
+$env:NAVIROUTE_METRICS_PASSWORD = $pw
+```
+Then start (or restart) the containers with `docker compose up -d`, and the app with `mvn spring-boot:run` in the same window.
+
 #### 10a. Prometheus Metrics
-Open browser: http://localhost:8080/actuator/prometheus
-→ Shows raw metrics (http_server_requests, jvm_memory, etc.)
+```powershell
+curl.exe -u "prometheus:$env:NAVIROUTE_METRICS_PASSWORD" http://localhost:8080/actuator/prometheus
+```
+→ Shows raw metrics (http_server_requests, jvm_memory, etc.). Without credentials: 401.
 
 #### 10b. Prometheus UI
 Open browser: http://localhost:9090
@@ -515,4 +546,7 @@ docker compose down -v
 | Kafka connection refused | Kafka takes ~30 sec to start. Check: `docker compose logs kafka` |
 | Port already in use | Run `docker compose down` first, then `docker compose up -d` |
 | Flyway migration fails | Run `docker compose down -v` to clear old data, then restart |
-| "JWT expired" errors | Re-login to get a fresh token |
+| "JWT expired" errors / 403 on every call | Log in again (or use `/api/auth/refresh`). Tokens also stop working when the app restarts without `JWT_SECRET`, or when the account is suspended |
+| App refuses to start: "JWT_SECRET ..." | With the `prod` profile, set `JWT_SECRET` to a random value of at least 32 bytes (not the `.env.example` placeholder) |
+| Prometheus target is DOWN (401) | Set `NAVIROUTE_METRICS_USERNAME=prometheus` and `NAVIROUTE_METRICS_PASSWORD` to the contents of `monitoring/secrets/metrics-password` |
+| Flyway error mentioning V12 or V13 | Existing data has duplicate active rides or case-variant emails; resolve them using the query in the migration file header |
