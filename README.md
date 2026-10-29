@@ -70,11 +70,11 @@ NaviRoute is based on the **Ride-Engine** project: <https://github.com/sasimohit
 | **Apache Kafka** | Event-driven communication between modules |
 | **WebSocket (STOMP over SockJS)** | Real-time push notifications to riders/drivers |
 | **CompletableFuture + @Async** | Asynchronous driver matching |
-| **Flyway** | Versioned database migrations (V1–V13) |
+| **Flyway** | Versioned database migrations (V1–V14) |
 | **Prometheus + Grafana** | Metrics collection and monitoring dashboards |
 | **Docker + Docker Compose** | Containerized local infrastructure |
 | **Maven** | Build and dependency management |
-| **JUnit 5 + Mockito, embedded PostgreSQL/Kafka/Redis** | Unit and integration tests (254 tests) |
+| **JUnit 5 + Mockito, embedded PostgreSQL/Kafka/Redis** | Unit and integration tests (268 tests) |
 
 ## Modules
 
@@ -162,8 +162,8 @@ NaviRoute is based on the **Ride-Engine** project: <https://github.com/sasimohit
 │   └── shared/       # kafka, redis, async, exceptions, dto, enums
 ├── src/main/resources/
 │   ├── application.yml, application-dev.yml, application-prod.yml
-│   └── db/migration/V1__…V13__*.sql
-├── src/test/java/com/ridesharing/           # 218 unit + 36 integration tests
+│   └── db/migration/V1__…V14__*.sql
+├── src/test/java/com/ridesharing/           # 224 unit + 44 integration tests
 ├── docker-compose.yml                       # Local infrastructure
 ├── Dockerfile                               # Multi-stage build
 ├── .env.example                             # Environment variable reference (placeholders only)
@@ -325,17 +325,21 @@ See [SETUP-AND-TESTING-GUIDE.md](SETUP-AND-TESTING-GUIDE.md) for the complete ma
 
 ## Testing
 
-`mvn verify` runs 254 tests:
+`mvn verify` runs 268 tests:
 
 ```
-218 unit tests (JUnit 5 + Mockito; repositories, Kafka and Redis mocked)
-├── Shared Infrastructure (incl. Redis serializer round-trip with the real serializer)
+224 unit tests (JUnit 5 + Mockito; repositories, Kafka and Redis mocked)
+├── Shared Infrastructure (incl. Redis serializer round-trip with the real serializer,
+│                          outbox publisher state transitions and backoff)
 ├── Auth Module (incl. admin bootstrap, JWT token types and signing-key validation)
 ├── Driver, Pricing, Admin, Ride, Notification, Payment, Rating modules
 └── Service-level flow test (e2e/RideSharingE2ETest — Mockito, no running infrastructure)
 
-36 integration tests (full Spring context + HTTP, real infrastructure processes)
-├── AdminAndDriverApprovalIntegrationTest — migrations V1–V13, admin login, pending/reject/re-approve
+44 integration tests (full Spring context + HTTP, real infrastructure processes)
+├── AdminAndDriverApprovalIntegrationTest — migrations V1–V14, admin login, pending/reject/re-approve
+├── OutboxIntegrationTest                 — outbox write in the completion transaction, rollback, publication,
+│                                           Kafka failure + retry, restart recovery, duplicate delivery,
+│                                           concurrent claiming and publishing
 ├── AuthSecurityIntegrationTest           — token types, refresh endpoint, suspension revokes tokens,
 │                                           case-insensitive email, generic login errors, concurrent registration
 ├── EndpointAccessIntegrationTest         — fare-cache authorization, Actuator health/metrics/Prometheus access
@@ -353,11 +357,12 @@ They do not cover WebSocket delivery, the Docker Compose stack, or network-level
 
 ## Database Schema
 
-13 Flyway migrations:
+14 Flyway migrations:
 - V1–V9 create the schema and seed data.
 - V10 backfills driver approval status, and V11 deactivates the unusable V7 seed admin.
 - V12 adds partial unique indexes: at most one active ride per rider and per driver.
 - V13 adds a unique index on `LOWER(email)`.
+- V14 creates the `outbox_events` table (transactional outbox).
 
 V12 and V13 **stop with an explicit error** if existing data violates them (duplicate active rides, or emails that differ only by case). Nothing is merged or rewritten automatically; each file's header contains the detection query.
 
@@ -369,16 +374,29 @@ The tables:
 - `rides` — ride lifecycle with timestamps and fare data
 - `payments` — one payment record per ride
 - `ratings` — bidirectional rider-driver ratings (1-5 stars)
+- `outbox_events` — Kafka events waiting to be published (see below)
 
 ## Event-Driven Architecture (Kafka Topics)
 
-| Topic | Publisher | Consumer(s) |
-|-------|-----------|-------------|
-| `ride-requested` | RideService | — |
-| `ride-accepted` | RideMatchingService | NotificationService |
-| `ride-completed` | RideService | PaymentService, NotificationService |
-| `ride-cancelled` | RideService, RideMatchingService | NotificationService |
-| `driver-approved` | AdminService | NotificationService |
+| Topic | Publisher | Delivery | Consumer(s) |
+|-------|-----------|----------|-------------|
+| `ride-requested` | RideService | After commit, best effort | — |
+| `ride-accepted` | RideMatchingService | After commit, best effort | NotificationService |
+| `ride-completed` | RideService | **Transactional outbox, at least once** | PaymentService, NotificationService |
+| `ride-cancelled` | RideService, RideMatchingService | After commit, best effort | NotificationService |
+| `driver-approved` | AdminService | Immediately, best effort | NotificationService |
+
+### Transactional outbox (`ride-completed`)
+
+Payments depend on `ride-completed`, so it is not sent to Kafka directly.
+
+1. **Stored atomically.** Completing a ride inserts an `outbox_events` row in the same database transaction that sets the ride to `COMPLETED`. If that transaction rolls back, neither change exists.
+2. **Published in the background.** `OutboxPublisher` polls every second. It claims due `PENDING` rows with `SELECT … FOR UPDATE SKIP LOCKED`, so several threads or application instances never work on the same row. It sends each row with the same `KafkaTemplate` and JSON contract as before, and waits for the broker acknowledgement (`acks=all`). Only then is the row marked `PUBLISHED`.
+3. **Retried on failure.** A failed send leaves the row `PENDING`, increments `attempts`, records `last_error`, and schedules `next_attempt_at` with exponential backoff (1 s, 2 s, 4 s … capped at 5 minutes). The rest of that batch waits for the next poll. Retries continue indefinitely; there is no dead-letter state.
+4. **Recovered after restart.** Pending events live in the database, so anything not yet published is picked up when the application starts again.
+5. **At-least-once, not exactly-once.** If the process stops after Kafka acknowledges a send but before the row is marked `PUBLISHED`, the event is sent again. The payment consumer is idempotent: one payment per ride (existence check plus the `uq_payments_ride` constraint). The payment is created `PENDING`; completing a ride never marks it paid.
+
+Settings (all optional): `naviroute.outbox.poll-interval-ms` (1000), `naviroute.outbox.batch-size` (50), `naviroute.outbox.send-timeout-ms` (10000), `naviroute.outbox.retry-base-delay-ms` (1000), `naviroute.outbox.retry-max-delay-ms` (300000).
 
 ## Monitoring
 
@@ -437,8 +455,11 @@ These were found by running the application, and are now covered by regression t
 
 ### Remaining functional risks
 
-- **Event delivery is not durable.** Kafka events are sent after the database commit, so a rolled-back change is never announced. But if the broker is unreachable at that moment, the event is lost: there is no transactional outbox. A lost `ride-completed` means no payment record is created for that ride.
-- **Duplicate events.** A redelivered `ride-completed` does not create a second payment, but the WebSocket notification is sent again.
+- **Only `ride-completed` uses the outbox.** `ride-requested`, `ride-accepted`, `ride-cancelled` and `driver-approved` are still sent after commit on a best-effort basis. If Kafka is unreachable at that moment, those events, and the notifications they trigger, are lost.
+- **Consumer-side loss.** If the payment consumer fails 4 times in a row on a record (for example, the database is down), Spring Kafka's error handler logs the error and skips it. There is no dead-letter topic, so that ride gets no payment record even though the event was delivered.
+- **Duplicate events.** Outbox delivery is at least once. A redelivered `ride-completed` does not create a second payment, but the WebSocket notification is sent again.
+- **Outbox housekeeping.** `PUBLISHED` rows are kept indefinitely; there is no cleanup job. A row whose payload can never be published (for example, a disallowed payload type) is retried every 5 minutes forever; watch `last_error`.
+- **Outbox publisher and the scheduler thread.** The publisher shares Spring's single scheduling thread with surge pricing. While Kafka is unreachable, one publishing attempt can block for up to the producer's `max.block.ms` (60 s by default), delaying the surge job.
 - **Suspending or rejecting a driver during a ride** revokes their tokens immediately, so they cannot start or complete that ride. A rider can cancel only before the ride starts, and there is no admin endpoint to close an `IN_PROGRESS` ride.
 - **Driver re-entry after cancellation** uses the driver's last reported position. If none is known, the driver rejoins on their next location update.
 - **Vehicle types are free text.** Matching compares the driver's registered vehicle type with the requested type (case-insensitive). A driver registered as `CAR` never matches `SEDAN` or `SUV` requests.

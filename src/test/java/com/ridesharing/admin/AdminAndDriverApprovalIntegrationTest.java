@@ -22,11 +22,13 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 class AdminAndDriverApprovalIntegrationTest extends IntegrationTestBase {
 
     @Test
-    @DisplayName("Flyway applies V1-V13 on a fresh database and the unusable V7 seed admin is deactivated")
+    @DisplayName("Flyway applies V1-V14 on a fresh database and the unusable V7 seed admin is deactivated")
     void migrationsApplied() {
         List<String> versions = jdbc.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class);
-        assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"), versions);
+        assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"), versions);
+        assertEquals(1, jdbc.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'outbox_events'", Integer.class));
 
         List<String> indexes = jdbc.queryForList(
                 "SELECT indexname FROM pg_indexes WHERE indexname IN "

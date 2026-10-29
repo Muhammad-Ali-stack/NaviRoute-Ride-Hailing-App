@@ -23,6 +23,7 @@ import com.ridesharing.pricing.repository.FareRuleRepository;
 import com.ridesharing.pricing.service.PricingService;
 import com.ridesharing.ride.dto.RideRequestDto;
 import com.ridesharing.ride.dto.RideResponseDto;
+import com.ridesharing.ride.events.RideEvent;
 import com.ridesharing.ride.model.Ride;
 import com.ridesharing.ride.repository.RideRepository;
 import com.ridesharing.ride.service.RideMatchingService;
@@ -39,6 +40,7 @@ import com.ridesharing.rating.service.RatingService;
 import com.ridesharing.shared.enums.*;
 import com.ridesharing.shared.exceptions.BadRequestException;
 import com.ridesharing.shared.exceptions.ConflictException;
+import com.ridesharing.shared.outbox.OutboxService;
 import com.ridesharing.shared.exceptions.ResourceNotFoundException;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -108,6 +110,7 @@ class RideSharingE2ETest {
     private AdminService adminService;
     private PricingService pricingService;
     private RideService rideService;
+    private OutboxService outboxService;
     private RideMatchingService rideMatchingService;
     private NotificationService notificationService;
     private PaymentRepository paymentRepository;
@@ -511,7 +514,7 @@ class RideSharingE2ETest {
         pricingService = new PricingService(fareRuleRepository, redisTemplate);
         rideMatchingService = mock(RideMatchingService.class);
         rideService = new RideService(rideRepository, userRepository,
-                pricingService, rideMatchingService, kafkaTemplate, mock(DriverLocationService.class));
+                pricingService, rideMatchingService, kafkaTemplate, mock(DriverLocationService.class), mock(OutboxService.class));
 
         User rider = createRiderUser();
         when(userRepository.findById(1L)).thenReturn(Optional.of(rider));
@@ -662,7 +665,12 @@ class RideSharingE2ETest {
         assertNotNull(ride.getCompletedAt());
         assertEquals(ride.getEstimatedFare(), ride.getActualFare());
         assertEquals(DriverAvailability.ONLINE, driver.getAvailability());
-        verify(kafkaTemplate).send(eq("ride-completed"), anyString(), any());
+        // ride-completed goes through the transactional outbox (stored in the completion
+        // transaction), not a direct Kafka send
+        verify(outboxService).enqueue(eq("ride-completed"), eq("100"),
+                argThat(e -> e instanceof RideEvent re && "COMPLETED".equals(re.getStatus())
+                        && ride.getActualFare().equals(re.getActualFare())));
+        verify(kafkaTemplate, never()).send(eq("ride-completed"), anyString(), any());
 
         System.out.println("  [PASS] Ride completed — fare: ₹" + ride.getActualFare()
                 + ", driver back ONLINE");
@@ -1208,6 +1216,7 @@ class RideSharingE2ETest {
     }
 
     private void setupRideServices() {
+        outboxService = mock(OutboxService.class);
         userRepository = mock(UserRepository.class);
         rideRepository = mock(RideRepository.class);
         fareRuleRepository = mock(FareRuleRepository.class);
@@ -1219,6 +1228,6 @@ class RideSharingE2ETest {
                 kafkaTemplate, redisTemplate, syncExecutor,
                 org.springframework.transaction.support.TransactionOperations.withoutTransaction());
         rideService = new RideService(rideRepository, userRepository,
-                pricingService, rideMatchingService, kafkaTemplate, mock(DriverLocationService.class));
+                pricingService, rideMatchingService, kafkaTemplate, mock(DriverLocationService.class), outboxService);
     }
 }

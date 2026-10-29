@@ -7,6 +7,7 @@ import com.ridesharing.pricing.dto.FareEstimateResponse;
 import com.ridesharing.pricing.service.PricingService;
 import com.ridesharing.ride.dto.RideRequestDto;
 import com.ridesharing.ride.dto.RideResponseDto;
+import com.ridesharing.ride.events.RideEvent;
 import com.ridesharing.ride.model.Ride;
 import com.ridesharing.ride.repository.RideRepository;
 import com.ridesharing.shared.enums.DriverApprovalStatus;
@@ -16,6 +17,7 @@ import com.ridesharing.shared.enums.UserRole;
 import com.ridesharing.shared.exceptions.BadRequestException;
 import com.ridesharing.shared.exceptions.ResourceNotFoundException;
 import com.ridesharing.shared.kafka.KafkaTopics;
+import com.ridesharing.shared.outbox.OutboxService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -56,6 +58,9 @@ class RideServiceTest {
 
     @Mock
     private DriverLocationService driverLocationService;
+
+    @Mock
+    private OutboxService outboxService;
 
     @InjectMocks
     private RideService rideService;
@@ -239,7 +244,22 @@ class RideServiceTest {
             assertNotNull(ride.getCompletedAt());
             assertEquals(ride.getEstimatedFare(), ride.getActualFare());
             assertEquals(DriverAvailability.ONLINE, driver.getAvailability());
-            verify(kafkaTemplate).send(eq(KafkaTopics.RIDE_COMPLETED), anyString(), any());
+            // ride-completed is stored in the transactional outbox, not sent to Kafka directly
+            verify(outboxService).enqueue(eq(KafkaTopics.RIDE_COMPLETED), eq("100"),
+                    argThat(e -> e instanceof RideEvent re && "COMPLETED".equals(re.getStatus())
+                            && new BigDecimal("105.00").equals(re.getActualFare())));
+            verify(kafkaTemplate, never()).send(eq(KafkaTopics.RIDE_COMPLETED), anyString(), any());
+        }
+
+        @Test
+        @DisplayName("A failed completion stores no outbox event")
+        void failedCompletionStoresNoOutboxEvent() {
+            ride.setStatus(RideStatus.ACCEPTED);
+            when(rideRepository.findByIdAndDriverId(100L, 2L)).thenReturn(Optional.of(ride));
+
+            assertThrows(BadRequestException.class, () -> rideService.completeRide(2L, 100L));
+
+            verifyNoInteractions(outboxService);
         }
 
         @Test

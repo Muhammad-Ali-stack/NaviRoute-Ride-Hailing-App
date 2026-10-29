@@ -378,7 +378,8 @@ API PUT "http://localhost:8080/api/rides/$RIDE_ID/complete" $null $DRIVER_TOKEN
 → Driver becomes ONLINE again
 
 **Behind the scenes:**
-- Publishes `ride-completed` Kafka event
+- Stores the `ride-completed` event in the `outbox_events` table in the same transaction as the COMPLETED status
+- The outbox publisher sends it to Kafka within about a second (if Kafka is down it retries with backoff, and pending events survive an app restart)
 - Payment consumer receives it → creates PENDING payment
 - Notification consumer receives it → sends WebSocket to both
 

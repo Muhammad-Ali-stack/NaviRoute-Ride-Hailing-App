@@ -39,6 +39,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
         "naviroute.admin.email=" + IntegrationTestBase.ADMIN_EMAIL,
         "naviroute.admin.password=" + IntegrationTestBase.ADMIN_PASSWORD,
         "naviroute.matching.retry-delay-ms=200",
+        // Outbox publisher polls quickly so payments appear promptly in tests
+        "naviroute.outbox.poll-interval-ms=200",
+        "naviroute.outbox.initial-delay-ms=200",
         "naviroute.metrics.username=" + IntegrationTestBase.METRICS_USERNAME,
         "naviroute.metrics.password=" + IntegrationTestBase.METRICS_PASSWORD,
         "spring.jpa.show-sql=false",
@@ -55,7 +58,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 // enable it so the Actuator security tests see the same endpoints as the running application.
 @AutoConfigureObservability(tracing = false)
 @EmbeddedKafka(partitions = 1, topics = {
-        "ride-requested", "ride-accepted", "ride-completed", "ride-cancelled", "driver-approved"})
+        "ride-requested", "ride-accepted", "ride-completed", "ride-cancelled", "driver-approved",
+        "outbox-it"})
 public abstract class IntegrationTestBase {
 
     protected static final String ADMIN_EMAIL = "it-admin@naviroute.test";

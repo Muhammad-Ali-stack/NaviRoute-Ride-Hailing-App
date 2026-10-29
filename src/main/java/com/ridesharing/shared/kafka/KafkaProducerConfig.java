@@ -47,6 +47,9 @@ public class KafkaProducerConfig {
 
         // Values are Java objects serialized to JSON bytes.
         configProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
+        // A send is acknowledged only once all in-sync replicas have the record (the Kafka
+        // client default, stated explicitly: OutboxPublisher marks events PUBLISHED on this ack)
+        configProps.put(ProducerConfig.ACKS_CONFIG, "all");
 
         return new DefaultKafkaProducerFactory<>(configProps);
     }

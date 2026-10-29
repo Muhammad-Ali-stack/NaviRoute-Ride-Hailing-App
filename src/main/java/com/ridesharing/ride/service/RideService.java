@@ -18,6 +18,7 @@ import com.ridesharing.shared.enums.UserRole;
 import com.ridesharing.shared.exceptions.BadRequestException;
 import com.ridesharing.shared.exceptions.ResourceNotFoundException;
 import com.ridesharing.shared.kafka.KafkaTopics;
+import com.ridesharing.shared.outbox.OutboxService;
 import com.ridesharing.shared.tx.AfterCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,19 +55,22 @@ public class RideService {
     private final RideMatchingService rideMatchingService;
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final DriverLocationService driverLocationService;
+    private final OutboxService outboxService;
 
     public RideService(RideRepository rideRepository,
                        UserRepository userRepository,
                        PricingService pricingService,
                        RideMatchingService rideMatchingService,
                        KafkaTemplate<String, Object> kafkaTemplate,
-                       DriverLocationService driverLocationService) {
+                       DriverLocationService driverLocationService,
+                       OutboxService outboxService) {
         this.rideRepository = rideRepository;
         this.userRepository = userRepository;
         this.pricingService = pricingService;
         this.rideMatchingService = rideMatchingService;
         this.kafkaTemplate = kafkaTemplate;
         this.driverLocationService = driverLocationService;
+        this.outboxService = outboxService;
     }
 
     /**
@@ -169,8 +173,9 @@ public class RideService {
     /**
      * Step 3: Driver completes the ride (reaches destination).
      * Transition: IN_PROGRESS → COMPLETED
-     * Publishes ride-completed event (consumed by Payment + Notification modules)
-     * only after the transaction commits.
+     * The ride-completed event (consumed by Payment + Notification modules) is written to the
+     * transactional outbox in THIS transaction, so it is committed — or rolled back — together
+     * with the COMPLETED status. OutboxPublisher then delivers it to Kafka (at least once).
      */
     @Transactional
     public RideResponseDto completeRide(Long driverId, Long rideId) {
@@ -190,7 +195,9 @@ public class RideService {
         // pool at their last reported position, or at the drop-off point
         releaseDriver(ride.getDriver(), ride.getDropoffLatitude(), ride.getDropoffLongitude());
 
-        publishRideEvent(ride, KafkaTopics.RIDE_COMPLETED);
+        // Payments depend on this event, so it goes through the outbox instead of a
+        // fire-and-forget send after commit (which could be lost)
+        outboxService.enqueue(KafkaTopics.RIDE_COMPLETED, ride.getId().toString(), buildRideEvent(ride));
 
         log.info("Ride {} completed by driver {} — fare: {}", rideId, driverId, ride.getActualFare());
         return toResponseDto(ride);
@@ -305,7 +312,14 @@ public class RideService {
     }
 
     private void publishRideEvent(Ride ride, String topic) {
-        RideEvent event = RideEvent.builder()
+        RideEvent event = buildRideEvent(ride);
+
+        // Sent only once the ride change is committed; never for a rolled-back transaction
+        AfterCommit.run(() -> sendEvent(topic, event));
+    }
+
+    private RideEvent buildRideEvent(Ride ride) {
+        return RideEvent.builder()
                 .rideId(ride.getId())
                 .riderId(ride.getRider().getId())
                 .driverId(ride.getDriver() != null ? ride.getDriver().getId() : null)
@@ -320,9 +334,6 @@ public class RideService {
                 .surgeMultiplier(ride.getSurgeMultiplier())
                 .timestamp(System.currentTimeMillis())
                 .build();
-
-        // Sent only once the ride change is committed; never for a rolled-back transaction
-        AfterCommit.run(() -> sendEvent(topic, event));
     }
 
     private void sendEvent(String topic, RideEvent event) {
