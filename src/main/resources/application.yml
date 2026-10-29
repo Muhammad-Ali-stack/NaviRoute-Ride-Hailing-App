@@ -1,0 +1,42 @@
+# ============================================================
+# NaviRoute — Common Configuration
+# Profile-specific settings in application-dev.yml / application-prod.yml
+# ============================================================
+
+spring:
+  application:
+    name: naviroute
+
+  profiles:
+    active: dev
+
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    default-property-inclusion: non_null
+
+server:
+  port: 8080
+
+# Optional administrator bootstrap (see .env.example). No default password exists:
+# if both are unset, no admin account is created or changed at startup.
+naviroute:
+  admin:
+    email: ${NAVIROUTE_ADMIN_EMAIL:}
+    password: ${NAVIROUTE_ADMIN_PASSWORD:}
+
+# Actuator endpoints for Prometheus monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
