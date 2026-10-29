@@ -32,6 +32,9 @@ application-local.yml
 # ── Node (if frontend added later) ──
 node_modules/
 
+# ── Local monitoring secrets (Prometheus scrape password) ──
+monitoring/secrets/
+
 # ── Docker data volumes ──
 postgres-data/
 redis-data/

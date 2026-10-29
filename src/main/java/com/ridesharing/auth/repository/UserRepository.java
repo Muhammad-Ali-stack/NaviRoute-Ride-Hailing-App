@@ -3,7 +3,9 @@ package com.ridesharing.auth.repository;
 import com.ridesharing.auth.model.User;
 import com.ridesharing.shared.enums.DriverApprovalStatus;
 import com.ridesharing.shared.enums.UserRole;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -44,8 +46,12 @@ public interface UserRepository extends JpaRepository<User, Long> {
      *
      * @param email the email to search for
      * @return Optional containing the user if found, empty if not
+     *
+     * Email identity is case-insensitive: the lookup compares LOWER(email), which is also
+     * what the uq_users_email_lower unique index (V13) enforces.
      */
-    Optional<User> findByEmail(String email);
+    @Query("SELECT u FROM User u WHERE LOWER(u.email) = LOWER(:email)")
+    Optional<User> findByEmail(@Param("email") String email);
 
     /**
      * Checks if an email is already registered.
@@ -54,9 +60,27 @@ public interface UserRepository extends JpaRepository<User, Long> {
      * Spring auto-generates: SELECT EXISTS(SELECT 1 FROM users WHERE email = ?)
      *
      * @param email the email to check
-     * @return true if email exists, false otherwise
+     * @return true if email exists (ignoring letter case), false otherwise
      */
-    boolean existsByEmail(String email);
+    @Query("SELECT COUNT(u) > 0 FROM User u WHERE LOWER(u.email) = LOWER(:email)")
+    boolean existsByEmail(@Param("email") String email);
+
+    /**
+     * Returns only the account's active flag (empty if the user no longer exists).
+     * Used on every authenticated request so that suspended or deactivated accounts
+     * cannot keep using previously issued tokens.
+     */
+    @Query("SELECT u.active FROM User u WHERE u.id = :id")
+    Optional<Boolean> findActiveById(@Param("id") Long id);
+
+    /**
+     * Loads a user with a row lock (SELECT ... FOR UPDATE). Must be called in a transaction.
+     * Used when a driver changes availability, so the change serializes with ride
+     * assignment (which claims the same row).
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT u FROM User u WHERE u.id = :id")
+    Optional<User> findByIdForUpdate(@Param("id") Long id);
 
     /**
      * Finds all drivers with a specific approval status.

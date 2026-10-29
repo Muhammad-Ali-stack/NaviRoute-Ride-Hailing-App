@@ -79,6 +79,8 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      # Scrape password for /actuator/prometheus (git-ignored file; see README "Monitoring")
+      - ./monitoring/secrets:/etc/prometheus/secrets:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'

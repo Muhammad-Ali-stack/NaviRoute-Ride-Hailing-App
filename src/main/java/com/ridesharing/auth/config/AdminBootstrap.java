@@ -11,6 +11,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
+import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -53,7 +54,8 @@ public class AdminBootstrap implements ApplicationRunner {
                           @Value("${naviroute.admin.password:}") String password) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
-        this.email = email == null ? "" : email.trim();
+        // Same normalization as registration/login: email identity is case-insensitive
+        this.email = email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
         this.password = password == null ? "" : password;
     }
 

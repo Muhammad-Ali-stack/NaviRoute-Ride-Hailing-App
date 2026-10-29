@@ -6,6 +6,7 @@ import com.ridesharing.driver.dto.VehicleRequest;
 import com.ridesharing.driver.model.Vehicle;
 import com.ridesharing.driver.repository.DriverDocumentRepository;
 import com.ridesharing.driver.repository.VehicleRepository;
+import com.ridesharing.ride.repository.RideRepository;
 import com.ridesharing.shared.enums.DriverApprovalStatus;
 import com.ridesharing.shared.enums.DriverAvailability;
 import com.ridesharing.shared.enums.UserRole;
@@ -25,6 +26,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,6 +52,8 @@ class DriverServiceTest {
     private DriverDocumentRepository driverDocumentRepository;
     @Mock
     private DriverLocationService driverLocationService;
+    @Mock
+    private RideRepository rideRepository;
 
     @InjectMocks
     private DriverService driverService;
@@ -140,7 +144,7 @@ class DriverServiceTest {
     @DisplayName("should_goOnline_when_driverIsApproved")
     void should_goOnline_when_driverIsApproved() {
         // GIVEN: approved driver
-        when(userRepository.findById(1L)).thenReturn(Optional.of(driverUser));
+        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(driverUser));
         when(userRepository.save(any(User.class))).thenReturn(driverUser);
 
         // WHEN
@@ -156,7 +160,7 @@ class DriverServiceTest {
     void should_throwBadRequestException_when_unapprovedDriverGoesOnline() {
         // GIVEN: driver is PENDING approval
         driverUser.setApprovalStatus(DriverApprovalStatus.PENDING);
-        when(userRepository.findById(1L)).thenReturn(Optional.of(driverUser));
+        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(driverUser));
 
         // WHEN / THEN
         assertThrows(BadRequestException.class,
@@ -167,7 +171,7 @@ class DriverServiceTest {
     @DisplayName("should_removeFromRedis_when_driverGoesOffline")
     void should_removeFromRedis_when_driverGoesOffline() {
         // GIVEN
-        when(userRepository.findById(1L)).thenReturn(Optional.of(driverUser));
+        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(driverUser));
         when(userRepository.save(any(User.class))).thenReturn(driverUser);
 
         // WHEN
@@ -215,5 +219,41 @@ class DriverServiceTest {
         when(userRepository.findById(1L)).thenReturn(Optional.of(driverUser));
 
         assertThrows(BadRequestException.class, () -> driverService.updateLocation(1L, 12.97, 77.59));
+    }
+
+    @Test
+    void should_recordLastKnownLocationOnly_when_driverIsBusy() {
+        driverUser.setAvailability(DriverAvailability.BUSY);
+        when(userRepository.findById(1L)).thenReturn(Optional.of(driverUser));
+
+        driverService.updateLocation(1L, 12.97, 77.59);
+
+        verify(driverLocationService).recordLastKnownLocation(1L, 12.97, 77.59);
+        verify(driverLocationService, never()).updateDriverLocation(1L, 12.97, 77.59);
+    }
+
+    // ── ACTIVE RIDE (regression: a driver could go ONLINE while on an assigned ride) ──
+
+    @Test
+    void should_refuseOnline_when_driverHasActiveRide() {
+        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(driverUser));
+        when(rideRepository.existsByDriverIdAndStatusIn(eq(1L), any())).thenReturn(true);
+
+        assertThrows(BadRequestException.class,
+                () -> driverService.updateAvailability(1L, DriverAvailability.ONLINE, 12.97, 77.59));
+
+        verify(userRepository, never()).save(any(User.class));
+        verify(driverLocationService, never()).updateDriverLocation(1L, 12.97, 77.59);
+    }
+
+    @Test
+    void should_allowOffline_when_driverHasActiveRide() {
+        driverUser.setAvailability(DriverAvailability.BUSY);
+        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(driverUser));
+
+        driverService.updateAvailability(1L, DriverAvailability.OFFLINE, null, null);
+
+        verify(userRepository).save(driverUser);
+        verify(rideRepository, never()).existsByDriverIdAndStatusIn(any(), any());
     }
 }

@@ -9,16 +9,21 @@ import com.ridesharing.driver.model.DriverDocument;
 import com.ridesharing.driver.model.Vehicle;
 import com.ridesharing.driver.repository.DriverDocumentRepository;
 import com.ridesharing.driver.repository.VehicleRepository;
+import com.ridesharing.ride.repository.RideRepository;
 import com.ridesharing.shared.enums.DriverApprovalStatus;
 import com.ridesharing.shared.enums.DriverAvailability;
+import com.ridesharing.shared.enums.RideStatus;
 import com.ridesharing.shared.enums.UserRole;
 import com.ridesharing.shared.exceptions.BadRequestException;
 import com.ridesharing.shared.exceptions.ConflictException;
 import com.ridesharing.shared.exceptions.ResourceNotFoundException;
+import com.ridesharing.shared.tx.AfterCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
 
 /**
  * Business logic for all driver operations:
@@ -35,19 +40,25 @@ public class DriverService {
 
     private static final Logger log = LoggerFactory.getLogger(DriverService.class);
 
+    /** A driver with a ride in one of these states is not available for another one. */
+    private static final List<RideStatus> ACTIVE_RIDE_STATUSES = List.of(RideStatus.ACCEPTED, RideStatus.IN_PROGRESS);
+
     private final UserRepository userRepository;
     private final VehicleRepository vehicleRepository;
     private final DriverDocumentRepository driverDocumentRepository;
     private final DriverLocationService driverLocationService;
+    private final RideRepository rideRepository;
 
     public DriverService(UserRepository userRepository,
                          VehicleRepository vehicleRepository,
                          DriverDocumentRepository driverDocumentRepository,
-                         DriverLocationService driverLocationService) {
+                         DriverLocationService driverLocationService,
+                         RideRepository rideRepository) {
         this.userRepository = userRepository;
         this.vehicleRepository = vehicleRepository;
         this.driverDocumentRepository = driverDocumentRepository;
         this.driverLocationService = driverLocationService;
+        this.rideRepository = rideRepository;
     }
 
     /**
@@ -133,7 +144,13 @@ public class DriverService {
                                    Double latitude, Double longitude) {
         log.info("Updating availability for driver {}: {}", driverId, availability);
 
-        User driver = getVerifiedDriver(driverId);
+        // Row lock on the driver: serializes this change with ride assignment, which
+        // claims the same row (ONLINE → BUSY). Lock order is users → rides, as in assignment.
+        User driver = userRepository.findByIdForUpdate(driverId)
+                .orElseThrow(() -> new ResourceNotFoundException("Driver", "id", driverId));
+        if (driver.getRole() != UserRole.DRIVER) {
+            throw new BadRequestException("User with id " + driverId + " is not a driver");
+        }
 
         // Only admin-approved drivers can go ONLINE
         if (availability == DriverAvailability.ONLINE
@@ -141,16 +158,26 @@ public class DriverService {
             throw new BadRequestException("Driver must be approved by admin before going online");
         }
 
+        // A driver with an assigned ride must finish (or cancel) it before becoming available.
+        // Read after taking the lock, so an assignment that committed meanwhile is visible.
+        if (availability == DriverAvailability.ONLINE
+                && rideRepository.existsByDriverIdAndStatusIn(driverId, ACTIVE_RIDE_STATUSES)) {
+            throw new BadRequestException("Driver has an active ride and cannot go online until it ends");
+        }
+
         driver.setAvailability(availability);
         userRepository.save(driver);
 
-        // Update Redis GEO based on new availability
-        if (availability == DriverAvailability.ONLINE && latitude != null && longitude != null) {
-            driverLocationService.updateDriverLocation(driverId, latitude, longitude);
-        } else {
-            // OFFLINE or BUSY: remove from nearby search results
-            driverLocationService.removeDriverLocation(driverId);
-        }
+        // Update Redis GEO based on new availability — after the commit, so a rolled-back
+        // change never alters the matching pool
+        AfterCommit.run(() -> {
+            if (availability == DriverAvailability.ONLINE && latitude != null && longitude != null) {
+                driverLocationService.updateDriverLocation(driverId, latitude, longitude);
+            } else {
+                // OFFLINE or BUSY: remove from nearby search results
+                driverLocationService.removeDriverLocation(driverId);
+            }
+        });
 
         log.info("Driver {} is now {}", driverId, availability);
     }
@@ -178,6 +205,9 @@ public class DriverService {
         if (driver.getAvailability() == DriverAvailability.ONLINE) {
             driverLocationService.updateDriverLocation(driverId, latitude, longitude);
         } else {
+            // BUSY/OFFLINE: remember the position (used to rejoin the pool when a ride ends)
+            // but do not make the driver matchable
+            driverLocationService.recordLastKnownLocation(driverId, latitude, longitude);
             log.debug("Driver {} is {} — location not added to the matching pool",
                     driverId, driver.getAvailability());
         }

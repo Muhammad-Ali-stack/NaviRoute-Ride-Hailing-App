@@ -41,6 +41,10 @@ public class DriverLocationService {
     // Key naming: "driver:locations" — clear, descriptive, follows our convention
     private static final String DRIVER_LOCATIONS_KEY = "driver:locations";
 
+    // Last reported position of every approved driver (including BUSY ones). Never searched
+    // by matching; only used to put a driver back into the pool when a ride ends.
+    private static final String LAST_KNOWN_LOCATIONS_KEY = "driver:last-known-locations";
+
     private final RedisTemplate<String, Object> redisTemplate;
 
     public DriverLocationService(RedisTemplate<String, Object> redisTemplate) {
@@ -68,8 +72,52 @@ public class DriverLocationService {
                 new Point(longitude, latitude),
                 driverId.toString()
         );
+        recordLastKnownLocation(driverId, latitude, longitude);
 
         log.debug("Updated location for driver {}: lat={}, lng={}", driverId, latitude, longitude);
+    }
+
+    /**
+     * Remembers a driver's latest position WITHOUT adding them to the matching pool.
+     * Used while a driver is BUSY (on a ride), so they can rejoin the pool at their
+     * real position when the ride ends.
+     *
+     * Redis key: "driver:last-known-locations" (not searched by matching)
+     */
+    public void recordLastKnownLocation(Long driverId, double latitude, double longitude) {
+        redisTemplate.opsForGeo().add(
+                LAST_KNOWN_LOCATIONS_KEY,
+                new Point(longitude, latitude),
+                driverId.toString()
+        );
+    }
+
+    /**
+     * Puts a driver back into the matching pool after a ride ends.
+     * Uses the driver's last reported position; if none was reported, the fallback
+     * position (e.g. the ride's drop-off point) is used. With neither, the driver is
+     * not added and rejoins on their next location update.
+     *
+     * Callers must have checked that the driver is eligible (approved, active, ONLINE).
+     *
+     * @return true if the driver was added to the pool
+     */
+    public boolean rejoinMatchingPool(Long driverId, Double fallbackLatitude, Double fallbackLongitude) {
+        List<Point> positions = redisTemplate.opsForGeo().position(LAST_KNOWN_LOCATIONS_KEY, driverId.toString());
+        Point lastKnown = positions == null || positions.isEmpty() ? null : positions.get(0);
+
+        if (lastKnown != null) {
+            updateDriverLocation(driverId, lastKnown.getY(), lastKnown.getX());
+            log.debug("Driver {} rejoined the matching pool at last known position", driverId);
+            return true;
+        }
+        if (fallbackLatitude != null && fallbackLongitude != null) {
+            updateDriverLocation(driverId, fallbackLatitude, fallbackLongitude);
+            log.debug("Driver {} rejoined the matching pool at fallback position", driverId);
+            return true;
+        }
+        log.debug("Driver {} has no known position — will rejoin on next location update", driverId);
+        return false;
     }
 
     /**

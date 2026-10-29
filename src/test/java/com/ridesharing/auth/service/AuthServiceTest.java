@@ -9,8 +9,9 @@ import com.ridesharing.shared.enums.DriverApprovalStatus;
 import com.ridesharing.shared.enums.DriverAvailability;
 import com.ridesharing.shared.enums.UserRole;
 import com.ridesharing.shared.exceptions.ConflictException;
-import com.ridesharing.shared.exceptions.ResourceNotFoundException;
 import com.ridesharing.shared.exceptions.UnauthorizedException;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.util.Optional;
@@ -30,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,7 +53,7 @@ import static org.mockito.Mockito.when;
  * Happy path: register/login with valid data
  * Failure 1: register with duplicate email → ConflictException
  * Failure 2: login with wrong password → UnauthorizedException
- * Failure 3: login with non-existent email → ResourceNotFoundException
+ * Failure 3: login with non-existent email → same UnauthorizedException as a wrong password
  * Edge case: register as ADMIN → blocked
  */
 @ExtendWith(MockitoExtension.class)
@@ -210,14 +213,19 @@ class AuthServiceTest {
     }
 
     @Test
-    @DisplayName("should_throwResourceNotFoundException_when_emailNotFound")
-    void should_throwResourceNotFoundException_when_emailNotFound() {
+    @DisplayName("should_throwGenericUnauthorized_when_emailNotFound")
+    void should_throwGenericUnauthorized_when_emailNotFound() {
         // GIVEN: email doesn't exist in database
         when(userRepository.findByEmail("raj@example.com")).thenReturn(Optional.empty());
 
-        // WHEN / THEN
-        assertThrows(ResourceNotFoundException.class,
+        // WHEN / THEN: same 401 + message as a wrong password — no account enumeration
+        // (previously a 404 "User not found with email ..." revealed which emails exist)
+        UnauthorizedException ex = assertThrows(UnauthorizedException.class,
                 () -> authService.login(loginRequest));
+
+        assertEquals("Invalid email or password", ex.getMessage());
+        // A dummy BCrypt comparison is still performed, so timing does not reveal the miss either
+        verify(passwordEncoder).matches(eq("securePass123"), any());
     }
 
     @Test
@@ -237,14 +245,111 @@ class AuthServiceTest {
     @Test
     @DisplayName("should_throwUnauthorizedException_when_accountIsSuspended")
     void should_throwUnauthorizedException_when_accountIsSuspended() {
-        // GIVEN: user exists but account is suspended
+        // GIVEN: user exists but account is suspended (and the password is correct)
         savedUser.setActive(false);
         when(userRepository.findByEmail("raj@example.com")).thenReturn(Optional.of(savedUser));
+        when(passwordEncoder.matches("securePass123", "$2a$10$hashedPassword")).thenReturn(true);
 
         // WHEN / THEN
         UnauthorizedException ex = assertThrows(UnauthorizedException.class,
                 () -> authService.login(loginRequest));
 
         assertEquals("Account is suspended. Contact support.", ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("should_notRevealSuspension_when_passwordIsWrong")
+    void should_notRevealSuspension_when_passwordIsWrong() {
+        savedUser.setActive(false);
+        when(userRepository.findByEmail("raj@example.com")).thenReturn(Optional.of(savedUser));
+        when(passwordEncoder.matches("securePass123", "$2a$10$hashedPassword")).thenReturn(false);
+
+        UnauthorizedException ex = assertThrows(UnauthorizedException.class,
+                () -> authService.login(loginRequest));
+
+        assertEquals("Invalid email or password", ex.getMessage());
+    }
+
+    // ── EMAIL NORMALIZATION ──
+
+    @Test
+    @DisplayName("should_storeLowerCaseEmail_when_registeringWithMixedCase")
+    void should_storeLowerCaseEmail_when_registeringWithMixedCase() {
+        registerRequest.setEmail("  Raj.Kumar@Example.COM ");
+        when(userRepository.existsByEmail("raj.kumar@example.com")).thenReturn(false);
+        when(userRepository.save(any(User.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        authService.register(registerRequest);
+
+        ArgumentCaptor<User> captor = ArgumentCaptor.forClass(User.class);
+        verify(userRepository).save(captor.capture());
+        assertEquals("raj.kumar@example.com", captor.getValue().getEmail());
+    }
+
+    @Test
+    @DisplayName("should_lookUpNormalizedEmail_when_loggingInWithMixedCase")
+    void should_lookUpNormalizedEmail_when_loggingInWithMixedCase() {
+        loginRequest.setEmail("RAJ@Example.com");
+        when(userRepository.findByEmail("raj@example.com")).thenReturn(Optional.of(savedUser));
+        when(passwordEncoder.matches("securePass123", "$2a$10$hashedPassword")).thenReturn(true);
+
+        assertNotNull(authService.login(loginRequest));
+    }
+
+    @Test
+    @DisplayName("should_throwConflict_when_concurrentRegistrationHitsUniqueIndex")
+    void should_throwConflict_when_concurrentRegistrationHitsUniqueIndex() {
+        when(userRepository.existsByEmail("raj@example.com")).thenReturn(false);
+        when(userRepository.save(any(User.class)))
+                .thenThrow(new DataIntegrityViolationException("uq_users_email_lower"));
+
+        assertThrows(ConflictException.class, () -> authService.register(registerRequest));
+    }
+
+    @Test
+    @DisplayName("normalizeEmail only trims and lower-cases")
+    void normalizeEmail_onlyTrimsAndLowerCases() {
+        assertEquals("first.last+tag@sub.example.com",
+                AuthService.normalizeEmail("  First.Last+Tag@Sub.Example.COM\t"));
+    }
+
+    // ── REFRESH ──
+
+    @Test
+    @DisplayName("should_issueNewTokens_when_refreshTokenValidAndUserActive")
+    void should_issueNewTokens_when_refreshTokenValidAndUserActive() {
+        Claims claims = Jwts.claims().subject("1").build();
+        when(jwtService.parseRefreshToken("refresh-token")).thenReturn(Optional.of(claims));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(savedUser));
+        when(jwtService.generateAccessToken(1L, "RIDER")).thenReturn("new-access");
+        when(jwtService.generateRefreshToken(1L, "RIDER")).thenReturn("new-refresh");
+
+        AuthResponse response = authService.refresh("refresh-token");
+
+        assertEquals("new-access", response.getAccessToken());
+        assertEquals("new-refresh", response.getRefreshToken());
+    }
+
+    @Test
+    @DisplayName("should_rejectRefresh_when_tokenIsNotARefreshToken")
+    void should_rejectRefresh_when_tokenIsNotARefreshToken() {
+        when(jwtService.parseRefreshToken("access-token")).thenReturn(Optional.empty());
+
+        UnauthorizedException ex = assertThrows(UnauthorizedException.class,
+                () -> authService.refresh("access-token"));
+        assertEquals("Invalid or expired refresh token", ex.getMessage());
+        verify(userRepository, never()).findById(anyLong());
+    }
+
+    @Test
+    @DisplayName("should_rejectRefresh_when_userSuspended")
+    void should_rejectRefresh_when_userSuspended() {
+        savedUser.setActive(false);
+        Claims claims = Jwts.claims().subject("1").build();
+        when(jwtService.parseRefreshToken("refresh-token")).thenReturn(Optional.of(claims));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(savedUser));
+
+        assertThrows(UnauthorizedException.class, () -> authService.refresh("refresh-token"));
+        verify(jwtService, never()).generateAccessToken(anyLong(), anyString());
     }
 }

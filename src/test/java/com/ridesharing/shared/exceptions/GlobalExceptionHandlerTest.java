@@ -6,6 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.mock.web.MockHttpServletRequest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -120,6 +121,19 @@ class GlobalExceptionHandlerTest {
         assertNotNull(response.getBody());
         assertEquals(500, response.getBody().getStatus());
         assertEquals("An unexpected error occurred. Please try again later.", response.getBody().getMessage());
+        assertEquals("/api/test", response.getBody().getPath());
+    }
+
+    @Test
+    @DisplayName("should_return404_when_noHandlerOrResourceMatchesThePath")
+    void should_return404_when_noHandlerOrResourceMatchesThePath() {
+        NoResourceFoundException ex = new NoResourceFoundException(
+                org.springframework.http.HttpMethod.GET, "actuator/env");
+
+        ResponseEntity<ErrorResponse> response = handler.handleNoResourceFound(ex, request);
+
+        assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
+        assertEquals(404, response.getBody().getStatus());
         assertEquals("/api/test", response.getBody().getPath());
     }
 }

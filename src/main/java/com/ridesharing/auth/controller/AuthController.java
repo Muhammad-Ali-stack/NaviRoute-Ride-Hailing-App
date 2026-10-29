@@ -2,6 +2,7 @@ package com.ridesharing.auth.controller;
 
 import com.ridesharing.auth.dto.AuthResponse;
 import com.ridesharing.auth.dto.LoginRequest;
+import com.ridesharing.auth.dto.RefreshTokenRequest;
 import com.ridesharing.auth.dto.RegisterRequest;
 import com.ridesharing.auth.service.AuthService;
 import com.ridesharing.shared.dto.ApiResponse;
@@ -112,5 +113,22 @@ public class AuthController {
         log.info("Login request received for email: {}", request.getEmail());
         AuthResponse authResponse = authService.login(request);
         return ResponseEntity.ok(ApiResponse.success("Login successful", authResponse));
+    }
+
+    /**
+     * POST /api/auth/refresh
+     * Exchanges a refresh token for a new access + refresh token pair.
+     * Only refresh tokens are accepted (an access token gets 401), and the account
+     * must still be active.
+     *
+     * Example request:
+     *   { "refreshToken": "eyJhbGci..." }
+     *
+     * Response: same shape as login.
+     */
+    @PostMapping("/refresh")
+    public ResponseEntity<ApiResponse<AuthResponse>> refresh(@Valid @RequestBody RefreshTokenRequest request) {
+        AuthResponse authResponse = authService.refresh(request.getRefreshToken());
+        return ResponseEntity.ok(ApiResponse.success("Token refreshed", authResponse));
     }
 }

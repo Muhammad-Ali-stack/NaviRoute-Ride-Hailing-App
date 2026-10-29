@@ -153,6 +153,16 @@ public class AdminService {
                 .orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
 
         user.setActive(active);
+
+        // A suspended driver must not stay matchable. An idle driver is set OFFLINE; a driver
+        // on a ride stays BUSY (the ride keeps its driver) and is set OFFLINE when it ends.
+        // Reactivation does not put the driver back online — they go ONLINE themselves.
+        if (!active && user.getRole() == UserRole.DRIVER) {
+            if (user.getAvailability() == DriverAvailability.ONLINE) {
+                user.setAvailability(DriverAvailability.OFFLINE);
+            }
+            driverLocationService.removeDriverLocation(userId);
+        }
         userRepository.save(user);
 
         log.info("User {} active status set to {}", userId, active);

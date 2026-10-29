@@ -5,9 +5,9 @@
 ## STEP 1: Install Docker Desktop
 
 Docker is the ONLY thing you need to install. It runs PostgreSQL, Redis, Kafka, Prometheus, and Grafana as containers on your machine.
-
 ### What is Docker? (Quick Explanation)
 Think of Docker as a "mini virtual machine" manager. Instead of installing PostgreSQL directly on Windows (dealing with installers, PATH, services), you just say "docker, run PostgreSQL" and it downloads a pre-configured image and runs it in an isolated container.
+
 
 ### Install Docker Desktop for Windows
 

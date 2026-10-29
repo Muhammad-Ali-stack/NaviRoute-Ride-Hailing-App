@@ -17,6 +17,8 @@ import com.ridesharing.shared.tx.AfterCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.ConcurrencyFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Async;
@@ -211,23 +213,32 @@ public class RideMatchingService {
     AssignmentResult tryAssign(Ride ride, User driver) {
         LocalDateTime now = LocalDateTime.now();
 
-        AssignmentResult result = transactionOperations.execute(status -> {
-            if (userRepository.claimAvailableDriver(driver.getId(), now) == 0) {
-                return AssignmentResult.DRIVER_UNAVAILABLE;
-            }
-            if (rideRepository.assignDriverIfRequested(ride.getId(), driver, now) == 0) {
-                status.setRollbackOnly();
-                return AssignmentResult.RIDE_NOT_REQUESTED;
-            }
+        AssignmentResult result;
+        try {
+            result = transactionOperations.execute(status -> {
+                if (userRepository.claimAvailableDriver(driver.getId(), now) == 0) {
+                    return AssignmentResult.DRIVER_UNAVAILABLE;
+                }
+                if (rideRepository.assignDriverIfRequested(ride.getId(), driver, now) == 0) {
+                    status.setRollbackOnly();
+                    return AssignmentResult.RIDE_NOT_REQUESTED;
+                }
 
-            ride.setDriver(driver);
-            ride.setStatus(RideStatus.ACCEPTED);
-            ride.setAcceptedAt(now);
-            driver.setAvailability(DriverAvailability.BUSY);
+                ride.setDriver(driver);
+                ride.setStatus(RideStatus.ACCEPTED);
+                ride.setAcceptedAt(now);
+                driver.setAvailability(DriverAvailability.BUSY);
 
-            publishRideEvent(ride, KafkaTopics.RIDE_ACCEPTED);
-            return AssignmentResult.ASSIGNED;
-        });
+                publishRideEvent(ride, KafkaTopics.RIDE_ACCEPTED);
+                return AssignmentResult.ASSIGNED;
+            });
+        } catch (DataIntegrityViolationException | ConcurrencyFailureException ex) {
+            // uq_rides_driver_active (V12): the driver already has an active ride, or the
+            // database aborted a lock conflict. The transaction rolled back — try another driver.
+            log.warn("Assignment of driver {} to ride {} rejected by the database: {}",
+                    driver.getId(), ride.getId(), ex.getMostSpecificCause().getMessage());
+            return AssignmentResult.DRIVER_UNAVAILABLE;
+        }
 
         if (result == AssignmentResult.ASSIGNED) {
             // Remove driver from available pool in Redis (after the DB commit)

@@ -293,7 +293,8 @@ class RideSharingE2ETest {
         vehicleRepository = mock(com.ridesharing.driver.repository.VehicleRepository.class);
         documentRepository = mock(com.ridesharing.driver.repository.DriverDocumentRepository.class);
         driverLocationService = new DriverLocationService(redisTemplate);
-        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService);
+        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService,
+                mock(RideRepository.class));
 
         User driver = createDriverUser();
         when(userRepository.findById(2L)).thenReturn(Optional.of(driver));
@@ -322,7 +323,8 @@ class RideSharingE2ETest {
         vehicleRepository = mock(com.ridesharing.driver.repository.VehicleRepository.class);
         documentRepository = mock(com.ridesharing.driver.repository.DriverDocumentRepository.class);
         driverLocationService = new DriverLocationService(redisTemplate);
-        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService);
+        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService,
+                mock(RideRepository.class));
 
         User driver = createDriverUser();
         when(userRepository.findById(2L)).thenReturn(Optional.of(driver));
@@ -391,12 +393,13 @@ class RideSharingE2ETest {
         vehicleRepository = mock(com.ridesharing.driver.repository.VehicleRepository.class);
         documentRepository = mock(com.ridesharing.driver.repository.DriverDocumentRepository.class);
         driverLocationService = new DriverLocationService(redisTemplate);
-        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService);
+        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService,
+                mock(RideRepository.class));
 
         User driver = createDriverUser();
         driver.setApprovalStatus(DriverApprovalStatus.APPROVED);
         driver.setAvailability(DriverAvailability.OFFLINE);
-        when(userRepository.findById(2L)).thenReturn(Optional.of(driver));
+        when(userRepository.findByIdForUpdate(2L)).thenReturn(Optional.of(driver));
         when(userRepository.save(any(User.class))).thenReturn(driver);
 
         driverService.updateAvailability(2L, DriverAvailability.ONLINE, 12.9716, 77.5946);
@@ -414,11 +417,12 @@ class RideSharingE2ETest {
         vehicleRepository = mock(com.ridesharing.driver.repository.VehicleRepository.class);
         documentRepository = mock(com.ridesharing.driver.repository.DriverDocumentRepository.class);
         driverLocationService = new DriverLocationService(redisTemplate);
-        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService);
+        driverService = new DriverService(userRepository, vehicleRepository, documentRepository, driverLocationService,
+                mock(RideRepository.class));
 
         User driver = createDriverUser();
         driver.setApprovalStatus(DriverApprovalStatus.PENDING);
-        when(userRepository.findById(2L)).thenReturn(Optional.of(driver));
+        when(userRepository.findByIdForUpdate(2L)).thenReturn(Optional.of(driver));
 
         assertThrows(BadRequestException.class,
                 () -> driverService.updateAvailability(2L, DriverAvailability.ONLINE, 12.9716, 77.5946));
@@ -507,7 +511,7 @@ class RideSharingE2ETest {
         pricingService = new PricingService(fareRuleRepository, redisTemplate);
         rideMatchingService = mock(RideMatchingService.class);
         rideService = new RideService(rideRepository, userRepository,
-                pricingService, rideMatchingService, kafkaTemplate);
+                pricingService, rideMatchingService, kafkaTemplate, mock(DriverLocationService.class));
 
         User rider = createRiderUser();
         when(userRepository.findById(1L)).thenReturn(Optional.of(rider));
@@ -1215,6 +1219,6 @@ class RideSharingE2ETest {
                 kafkaTemplate, redisTemplate, syncExecutor,
                 org.springframework.transaction.support.TransactionOperations.withoutTransaction());
         rideService = new RideService(rideRepository, userRepository,
-                pricingService, rideMatchingService, kafkaTemplate);
+                pricingService, rideMatchingService, kafkaTemplate, mock(DriverLocationService.class));
     }
 }

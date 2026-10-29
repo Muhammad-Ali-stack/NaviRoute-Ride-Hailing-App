@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -38,18 +39,30 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
         "naviroute.admin.email=" + IntegrationTestBase.ADMIN_EMAIL,
         "naviroute.admin.password=" + IntegrationTestBase.ADMIN_PASSWORD,
         "naviroute.matching.retry-delay-ms=200",
+        "naviroute.metrics.username=" + IntegrationTestBase.METRICS_USERNAME,
+        "naviroute.metrics.password=" + IntegrationTestBase.METRICS_PASSWORD,
         "spring.jpa.show-sql=false",
+        // The embedded Windows Redis 5.0.14 build returns INFO output that Spring's health
+        // indicator cannot parse ("Cannot read Redis info"), which would mark /actuator/health
+        // DOWN. Only the Redis *health indicator* is disabled; Redis itself is used for real.
+        "management.health.redis.enabled=false",
         "logging.level.com.ridesharing=INFO",
         "logging.level.org.springframework.web=INFO",
         "logging.level.org.hibernate.SQL=WARN"
 })
 @AutoConfigureMockMvc
+// Spring Boot tests disable metrics export by default, which would remove /actuator/prometheus;
+// enable it so the Actuator security tests see the same endpoints as the running application.
+@AutoConfigureObservability(tracing = false)
 @EmbeddedKafka(partitions = 1, topics = {
         "ride-requested", "ride-accepted", "ride-completed", "ride-cancelled", "driver-approved"})
 public abstract class IntegrationTestBase {
 
     protected static final String ADMIN_EMAIL = "it-admin@naviroute.test";
     protected static final String ADMIN_PASSWORD = "integration-test-admin-password";
+    // Test-only Prometheus scrape user (HTTP Basic on /actuator/prometheus)
+    protected static final String METRICS_USERNAME = "it-prometheus";
+    protected static final String METRICS_PASSWORD = "integration-test-metrics-password";
 
     // Pickup/dropoff used by ride tests (~5 km apart)
     protected static final double PICKUP_LAT = 12.9716;

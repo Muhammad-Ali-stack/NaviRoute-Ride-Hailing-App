@@ -268,6 +268,20 @@ class AdminServiceTest {
         }
 
         @Test
+        @DisplayName("Suspending an ONLINE driver sets them OFFLINE and removes them from the matching pool")
+        void shouldTakeSuspendedDriverOutOfPool() {
+            pendingDriver.setApprovalStatus(DriverApprovalStatus.APPROVED);
+            pendingDriver.setAvailability(DriverAvailability.ONLINE);
+            when(userRepository.findById(1L)).thenReturn(Optional.of(pendingDriver));
+
+            adminService.toggleUserActive(1L, false);
+
+            assertFalse(pendingDriver.isActive());
+            assertEquals(DriverAvailability.OFFLINE, pendingDriver.getAvailability());
+            verify(driverLocationService).removeDriverLocation(1L);
+        }
+
+        @Test
         @DisplayName("Should reactivate a user")
         void shouldReactivateUser() {
             pendingDriver.setActive(false);

@@ -1,13 +1,19 @@
 package com.ridesharing.auth.service;
 
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -124,5 +130,121 @@ class JwtServiceTest {
 
         // THEN: they should be different (different expiry times)
         assertFalse(accessToken.equals(refreshToken));
+    }
+
+    // ── TOKEN TYPE ENFORCEMENT ──
+
+    private static final String SECRET = "myTestSecretKeyThatIsAtLeast32CharactersLongForHS256";
+
+    @Test
+    @DisplayName("access token is accepted as access and rejected as refresh")
+    void accessTokenTypeIsEnforced() {
+        String access = jwtService.generateAccessToken(7L, "RIDER");
+
+        assertTrue(jwtService.isAccessToken(access));
+        assertFalse(jwtService.isRefreshToken(access));
+        assertEquals("7", jwtService.parseAccessToken(access).orElseThrow().getSubject());
+    }
+
+    @Test
+    @DisplayName("refresh token is accepted as refresh and rejected as access")
+    void refreshTokenTypeIsEnforced() {
+        String refresh = jwtService.generateRefreshToken(7L, "RIDER");
+
+        assertTrue(jwtService.isRefreshToken(refresh));
+        assertFalse(jwtService.isAccessToken(refresh));
+        assertTrue(jwtService.parseAccessToken(refresh).isEmpty());
+    }
+
+    @Test
+    @DisplayName("expired access and refresh tokens are rejected")
+    void expiredTokensRejected() {
+        ReflectionTestUtils.setField(jwtService, "accessTokenExpiry", -1000L);
+        ReflectionTestUtils.setField(jwtService, "refreshTokenExpiry", -1000L);
+
+        assertFalse(jwtService.isAccessToken(jwtService.generateAccessToken(1L, "RIDER")));
+        assertFalse(jwtService.isRefreshToken(jwtService.generateRefreshToken(1L, "RIDER")));
+    }
+
+    @Test
+    @DisplayName("malformed, tampered and empty tokens are rejected without throwing")
+    void malformedTokensRejected() {
+        String access = jwtService.generateAccessToken(1L, "RIDER");
+
+        assertTrue(jwtService.parseAccessToken("not-a-jwt").isEmpty());
+        assertTrue(jwtService.parseAccessToken("a.b.c").isEmpty());
+        assertTrue(jwtService.parseAccessToken("").isEmpty());
+        assertTrue(jwtService.parseAccessToken(access.substring(0, access.length() - 2) + "xx").isEmpty());
+        assertTrue(jwtService.parseRefreshToken("not-a-jwt").isEmpty());
+    }
+
+    @Test
+    @DisplayName("correctly signed token WITHOUT a type claim (pre-upgrade token) is rejected")
+    void tokenWithoutTypeRejected() {
+        String legacy = Jwts.builder()
+                .subject("1").claim("role", "ADMIN")
+                .issuedAt(new Date()).expiration(new Date(System.currentTimeMillis() + 60_000))
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)))
+                .compact();
+
+        assertTrue(jwtService.isTokenValid(legacy), "signature itself is valid");
+        assertFalse(jwtService.isAccessToken(legacy));
+        assertFalse(jwtService.isRefreshToken(legacy));
+    }
+
+    @Test
+    @DisplayName("token signed with a different key is rejected")
+    void foreignKeyRejected() {
+        JwtService other = new JwtService();
+        ReflectionTestUtils.setField(other, "secretKey", "anotherSecretKeyThatIsAlsoAtLeast32BytesLong!!");
+        ReflectionTestUtils.setField(other, "accessTokenExpiry", 900000L);
+
+        assertFalse(jwtService.isAccessToken(other.generateAccessToken(1L, "ADMIN")));
+    }
+
+    // ── SIGNING KEY CONFIGURATION ──
+
+    private static JwtService serviceWith(String secret, boolean allowEphemeral) {
+        JwtService service = new JwtService();
+        ReflectionTestUtils.setField(service, "secretKey", secret);
+        ReflectionTestUtils.setField(service, "allowEphemeralSecret", allowEphemeral);
+        ReflectionTestUtils.setField(service, "accessTokenExpiry", 900000L);
+        return service;
+    }
+
+    @Test
+    @DisplayName("startup fails when JWT_SECRET is missing (no fallback secret)")
+    void missingSecretFails() {
+        assertThrows(IllegalStateException.class, () -> serviceWith("", false).validateConfiguration());
+        assertThrows(IllegalStateException.class, () -> serviceWith(null, false).validateConfiguration());
+    }
+
+    @Test
+    @DisplayName("startup fails when JWT_SECRET is shorter than 32 bytes")
+    void shortSecretFails() {
+        assertThrows(IllegalStateException.class,
+                () -> serviceWith("only-31-bytes-long-secret-value", false).validateConfiguration());
+    }
+
+    @Test
+    @DisplayName("startup fails for secrets published in this repository")
+    void publishedSecretsFail() {
+        assertThrows(IllegalStateException.class, () -> serviceWith(
+                "myDefaultSecretKeyThatIsAtLeast32CharactersLongForHS256Algorithm", false).validateConfiguration());
+        assertThrows(IllegalStateException.class, () -> serviceWith(
+                "replace-with-a-long-random-secret", false).validateConfiguration());
+    }
+
+    @Test
+    @DisplayName("local development without JWT_SECRET uses a random key that differs per process")
+    void ephemeralKeyForLocalDevelopment() {
+        JwtService first = serviceWith("", true);
+        JwtService second = serviceWith("", true);
+        first.validateConfiguration();
+        second.validateConfiguration();
+
+        String token = first.generateAccessToken(1L, "RIDER");
+        assertTrue(first.isAccessToken(token));
+        assertFalse(second.isAccessToken(token), "a random key must not be shared or predictable");
     }
 }

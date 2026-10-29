@@ -27,6 +27,14 @@ spring:
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
 
+# JWT — JWT_SECRET is REQUIRED (random, at least 32 bytes). The application refuses to
+# start if it is missing, too short, or a value published in this repository.
+jwt:
+  secret: ${JWT_SECRET:}
+  allow-ephemeral-secret: false
+  access-token-expiry: ${JWT_ACCESS_TOKEN_EXPIRY:900000}
+  refresh-token-expiry: ${JWT_REFRESH_TOKEN_EXPIRY:604800000}
+
 logging:
   level:
     com.ridesharing: INFO

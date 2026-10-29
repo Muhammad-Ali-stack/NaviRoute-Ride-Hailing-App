@@ -22,11 +22,17 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 class AdminAndDriverApprovalIntegrationTest extends IntegrationTestBase {
 
     @Test
-    @DisplayName("Flyway applies V1-V11 on a fresh database and the unusable V7 seed admin is deactivated")
+    @DisplayName("Flyway applies V1-V13 on a fresh database and the unusable V7 seed admin is deactivated")
     void migrationsApplied() {
         List<String> versions = jdbc.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class);
-        assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"), versions);
+        assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"), versions);
+
+        List<String> indexes = jdbc.queryForList(
+                "SELECT indexname FROM pg_indexes WHERE indexname IN "
+                        + "('uq_rides_rider_active', 'uq_rides_driver_active', 'uq_users_email_lower') ORDER BY indexname",
+                String.class);
+        assertEquals(List.of("uq_rides_driver_active", "uq_rides_rider_active", "uq_users_email_lower"), indexes);
 
         Boolean seedActive = jdbc.queryForObject(
                 "SELECT active FROM users WHERE email = 'admin@ridesharing.com'", Boolean.class);
@@ -82,7 +88,9 @@ class AdminAndDriverApprovalIntegrationTest extends IntegrationTestBase {
         assertNull(redisTemplate.opsForGeo().position("driver:locations", driverId.toString()).get(0),
                 "rejected driver must be removed from the matching pool");
         expectStatus(401, perform(post("/api/auth/login"), null, Map.of("email", email, "password", "pass1234")));
-        expectStatus(400, perform(put("/api/driver/location"), driverToken,
+        // The token issued before rejection no longer authenticates (account inactive) → 403
+        // before reaching the service (previously it reached the service and got 400)
+        expectStatus(403, perform(put("/api/driver/location"), driverToken,
                 Map.of("latitude", 12.97, "longitude", 77.59)));
 
         expectStatus(200, perform(put("/api/admin/drivers/" + driverId + "/approve"), admin, null));

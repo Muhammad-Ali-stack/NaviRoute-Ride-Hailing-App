@@ -8,9 +8,14 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  # Spring Boot Actuator Prometheus endpoint
+  # Spring Boot Actuator Prometheus endpoint — protected by HTTP Basic.
+  # The app must run with NAVIROUTE_METRICS_USERNAME=prometheus and NAVIROUTE_METRICS_PASSWORD
+  # set to the contents of monitoring/secrets/metrics-password (git-ignored; see README).
   - job_name: 'naviroute'
     metrics_path: '/actuator/prometheus'
+    basic_auth:
+      username: 'prometheus'
+      password_file: /etc/prometheus/secrets/metrics-password
     static_configs:
       - targets: ['host.docker.internal:8080']
         labels:

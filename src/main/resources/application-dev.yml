@@ -26,9 +26,12 @@ spring:
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
 
-# JWT configuration — use environment variables in production
+# JWT configuration — there is no built-in secret.
+# Set JWT_SECRET (random, at least 32 bytes) for stable tokens. If it is unset, local
+# development signs with a random per-process key: tokens stop working after a restart.
 jwt:
-  secret: ${JWT_SECRET:myDefaultSecretKeyThatIsAtLeast32CharactersLongForHS256Algorithm}
+  secret: ${JWT_SECRET:}
+  allow-ephemeral-secret: true
   access-token-expiry: 900000
   refresh-token-expiry: 604800000
 

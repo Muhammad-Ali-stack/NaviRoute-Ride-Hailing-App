@@ -1,6 +1,8 @@
 package com.ridesharing.auth.filter;
 
+import com.ridesharing.auth.repository.UserRepository;
 import com.ridesharing.auth.service.JwtService;
+import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,6 +17,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Intercepts EVERY HTTP request before it reaches any controller.
@@ -23,8 +26,9 @@ import java.util.List;
  * Flow for every request:
  *   1. Check if Authorization header exists and starts with "Bearer "
  *   2. If no → skip this filter, let Spring Security handle (will return 401 for protected endpoints)
- *   3. If yes → extract the token, validate it using JwtService
- *   4. If valid → extract userId and role, tell Spring Security "this user is authenticated"
+ *   3. If yes → extract the token, validate it using JwtService (must be an ACCESS token)
+ *   4. If valid and the account is still active → extract userId and role,
+ *      tell Spring Security "this user is authenticated"
  *   5. If invalid → skip, Spring Security will reject the request
  *
  * OncePerRequestFilter guarantees this filter runs EXACTLY ONCE per request
@@ -36,9 +40,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private static final Logger log = LoggerFactory.getLogger(JwtAuthenticationFilter.class);
 
     private final JwtService jwtService;
+    private final UserRepository userRepository;
 
-    public JwtAuthenticationFilter(JwtService jwtService) {
+    public JwtAuthenticationFilter(JwtService jwtService, UserRepository userRepository) {
         this.jwtService = jwtService;
+        this.userRepository = userRepository;
     }
 
     /**
@@ -64,11 +70,28 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         // Step 3: Extract the token (remove "Bearer " prefix)
         String token = authHeader.substring(7);
 
-        // Step 4: Validate the token
-        if (jwtService.isTokenValid(token)) {
+        // Step 4: Validate the token — signature, expiry, and it must be an ACCESS token
+        // (a refresh token is never accepted as an API credential)
+        Optional<Claims> claims = jwtService.parseAccessToken(token);
+        if (claims.isPresent()) {
             // Step 5: Extract user info from token
-            Long userId = jwtService.extractUserId(token);
-            String role = jwtService.extractRole(token);
+            Long userId;
+            try {
+                userId = Long.valueOf(claims.get().getSubject());
+            } catch (NumberFormatException ex) {
+                log.warn("JWT rejected: subject is not a user id");
+                filterChain.doFilter(request, response);
+                return;
+            }
+            String role = claims.get().get("role", String.class);
+
+            // Step 5b: The account must still exist and be active. Suspension (active=false)
+            // therefore revokes tokens that were issued before it, on the very next request.
+            if (!userRepository.findActiveById(userId).orElse(false)) {
+                log.info("JWT rejected: user {} is suspended, deactivated or no longer exists", userId);
+                filterChain.doFilter(request, response);
+                return;
+            }
 
             // Step 6: Create Spring Security authentication object
             // "ROLE_" prefix is a Spring Security convention for role-based access

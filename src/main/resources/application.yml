@@ -30,6 +30,11 @@ naviroute:
   admin:
     email: ${NAVIROUTE_ADMIN_EMAIL:}
     password: ${NAVIROUTE_ADMIN_PASSWORD:}
+  # Optional HTTP Basic user that may read /actuator/prometheus (and nothing else).
+  # No default: if both are unset, only ADMIN tokens can read metrics.
+  metrics:
+    username: ${NAVIROUTE_METRICS_USERNAME:}
+    password: ${NAVIROUTE_METRICS_PASSWORD:}
 
 # Actuator endpoints for Prometheus monitoring
 management:
@@ -37,6 +42,12 @@ management:
     web:
       exposure:
         include: health,info,prometheus,metrics
+  # Access rules are in SecurityConfig: /actuator/health (+ /liveness, /readiness) is public,
+  # /actuator/prometheus needs the metrics scrape user or ADMIN, everything else needs ADMIN.
   endpoint:
     health:
-      show-details: always
+      # Component details (database, Redis, disk) only for authenticated admins
+      show-details: when-authorized
+      roles: ADMIN
+      probes:
+        enabled: true

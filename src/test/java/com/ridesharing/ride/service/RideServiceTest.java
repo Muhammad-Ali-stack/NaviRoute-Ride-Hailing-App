@@ -2,12 +2,14 @@ package com.ridesharing.ride.service;
 
 import com.ridesharing.auth.model.User;
 import com.ridesharing.auth.repository.UserRepository;
+import com.ridesharing.driver.service.DriverLocationService;
 import com.ridesharing.pricing.dto.FareEstimateResponse;
 import com.ridesharing.pricing.service.PricingService;
 import com.ridesharing.ride.dto.RideRequestDto;
 import com.ridesharing.ride.dto.RideResponseDto;
 import com.ridesharing.ride.model.Ride;
 import com.ridesharing.ride.repository.RideRepository;
+import com.ridesharing.shared.enums.DriverApprovalStatus;
 import com.ridesharing.shared.enums.DriverAvailability;
 import com.ridesharing.shared.enums.RideStatus;
 import com.ridesharing.shared.enums.UserRole;
@@ -22,6 +24,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.core.KafkaTemplate;
 
 import java.math.BigDecimal;
@@ -51,6 +54,9 @@ class RideServiceTest {
     @Mock
     private KafkaTemplate<String, Object> kafkaTemplate;
 
+    @Mock
+    private DriverLocationService driverLocationService;
+
     @InjectMocks
     private RideService rideService;
 
@@ -70,6 +76,7 @@ class RideServiceTest {
         driver = User.builder()
                 .id(2L).name("Test Driver").email("driver@test.com")
                 .phone("9876543210").role(UserRole.DRIVER).active(true)
+                .approvalStatus(DriverApprovalStatus.APPROVED)
                 .availability(DriverAvailability.BUSY)
                 .createdAt(LocalDateTime.now()).updatedAt(LocalDateTime.now())
                 .build();
@@ -98,6 +105,27 @@ class RideServiceTest {
     @Nested
     @DisplayName("Request Ride")
     class RequestRideTests {
+
+        @Test
+        @DisplayName("Concurrent duplicate request rejected by the active-ride unique index → 400, no matching")
+        void shouldRejectConcurrentDuplicateRequest() {
+            FareEstimateResponse fare = FareEstimateResponse.builder()
+                    .vehicleType("AUTO").distanceInKm(5.0).estimatedTimeInMinutes(12.0)
+                    .estimatedFare(new BigDecimal("105.00")).surgeMultiplier(BigDecimal.ONE)
+                    .build();
+            when(userRepository.findById(1L)).thenReturn(Optional.of(rider));
+            when(rideRepository.existsByRiderIdAndStatusIn(eq(1L), any())).thenReturn(false);
+            when(pricingService.estimateFare(any())).thenReturn(fare);
+            when(rideRepository.save(any(Ride.class)))
+                    .thenThrow(new DataIntegrityViolationException("uq_rides_rider_active"));
+
+            BadRequestException ex = assertThrows(BadRequestException.class,
+                    () -> rideService.requestRide(1L, rideRequest));
+
+            assertEquals("You already have an active ride", ex.getMessage());
+            verify(rideMatchingService, never()).matchDriverForRide(any());
+            verify(kafkaTemplate, never()).send(anyString(), anyString(), any());
+        }
 
         @Test
         @DisplayName("Should create a ride with fare estimate and trigger matching")
@@ -212,6 +240,48 @@ class RideServiceTest {
             assertEquals(ride.getEstimatedFare(), ride.getActualFare());
             assertEquals(DriverAvailability.ONLINE, driver.getAvailability());
             verify(kafkaTemplate).send(eq(KafkaTopics.RIDE_COMPLETED), anyString(), any());
+        }
+
+        @Test
+        @DisplayName("Completed ride returns the eligible driver to the matching pool (drop-off as fallback)")
+        void shouldReturnDriverToMatchingPool() {
+            ride.setStatus(RideStatus.IN_PROGRESS);
+            when(rideRepository.findByIdAndDriverId(100L, 2L)).thenReturn(Optional.of(ride));
+            when(rideRepository.save(any(Ride.class))).thenReturn(ride);
+
+            rideService.completeRide(2L, 100L);
+
+            verify(driverLocationService).rejoinMatchingPool(2L, 12.93, 77.62);
+        }
+
+        @Test
+        @DisplayName("Suspended driver is set OFFLINE on completion and not returned to the pool")
+        void shouldNotReturnSuspendedDriver() {
+            ride.setStatus(RideStatus.IN_PROGRESS);
+            driver.setActive(false);
+            when(rideRepository.findByIdAndDriverId(100L, 2L)).thenReturn(Optional.of(ride));
+            when(rideRepository.save(any(Ride.class))).thenReturn(ride);
+
+            rideService.completeRide(2L, 100L);
+
+            assertEquals(DriverAvailability.OFFLINE, driver.getAvailability());
+            verify(driverLocationService, never()).rejoinMatchingPool(anyLong(), any(), any());
+        }
+
+        @Test
+        @DisplayName("Rejected driver (already OFFLINE) stays OFFLINE on completion and is not returned to the pool")
+        void shouldNotReturnRejectedDriver() {
+            ride.setStatus(RideStatus.IN_PROGRESS);
+            driver.setApprovalStatus(DriverApprovalStatus.REJECTED);
+            driver.setActive(false);
+            driver.setAvailability(DriverAvailability.OFFLINE);
+            when(rideRepository.findByIdAndDriverId(100L, 2L)).thenReturn(Optional.of(ride));
+            when(rideRepository.save(any(Ride.class))).thenReturn(ride);
+
+            rideService.completeRide(2L, 100L);
+
+            assertEquals(DriverAvailability.OFFLINE, driver.getAvailability());
+            verify(driverLocationService, never()).rejoinMatchingPool(anyLong(), any(), any());
         }
 
         @Test

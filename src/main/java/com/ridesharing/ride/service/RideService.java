@@ -2,6 +2,7 @@ package com.ridesharing.ride.service;
 
 import com.ridesharing.auth.model.User;
 import com.ridesharing.auth.repository.UserRepository;
+import com.ridesharing.driver.service.DriverLocationService;
 import com.ridesharing.pricing.dto.FareEstimateRequest;
 import com.ridesharing.pricing.dto.FareEstimateResponse;
 import com.ridesharing.pricing.service.PricingService;
@@ -10,6 +11,7 @@ import com.ridesharing.ride.dto.RideResponseDto;
 import com.ridesharing.ride.events.RideEvent;
 import com.ridesharing.ride.model.Ride;
 import com.ridesharing.ride.repository.RideRepository;
+import com.ridesharing.shared.enums.DriverApprovalStatus;
 import com.ridesharing.shared.enums.DriverAvailability;
 import com.ridesharing.shared.enums.RideStatus;
 import com.ridesharing.shared.enums.UserRole;
@@ -19,6 +21,7 @@ import com.ridesharing.shared.kafka.KafkaTopics;
 import com.ridesharing.shared.tx.AfterCommit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -50,17 +53,20 @@ public class RideService {
     private final PricingService pricingService;
     private final RideMatchingService rideMatchingService;
     private final KafkaTemplate<String, Object> kafkaTemplate;
+    private final DriverLocationService driverLocationService;
 
     public RideService(RideRepository rideRepository,
                        UserRepository userRepository,
                        PricingService pricingService,
                        RideMatchingService rideMatchingService,
-                       KafkaTemplate<String, Object> kafkaTemplate) {
+                       KafkaTemplate<String, Object> kafkaTemplate,
+                       DriverLocationService driverLocationService) {
         this.rideRepository = rideRepository;
         this.userRepository = userRepository;
         this.pricingService = pricingService;
         this.rideMatchingService = rideMatchingService;
         this.kafkaTemplate = kafkaTemplate;
+        this.driverLocationService = driverLocationService;
     }
 
     /**
@@ -117,7 +123,14 @@ public class RideService {
                 .surgeMultiplier(fareEstimate.getSurgeMultiplier())
                 .build();
 
-        ride = rideRepository.save(ride);
+        // The check above is only a fast path. Two concurrent requests can both pass it;
+        // the uq_rides_rider_active partial unique index (V12) rejects the second insert.
+        try {
+            ride = rideRepository.save(ride);
+        } catch (DataIntegrityViolationException ex) {
+            log.warn("Concurrent ride request rejected for rider {}", riderId);
+            throw new BadRequestException("You already have an active ride");
+        }
 
         // Publish event + trigger async matching
         publishRideEvent(ride, KafkaTopics.RIDE_REQUESTED);
@@ -173,10 +186,9 @@ public class RideService {
         ride.setActualFare(ride.getEstimatedFare());
         ride = rideRepository.save(ride);
 
-        // Make driver available again
-        User driver = ride.getDriver();
-        driver.setAvailability(DriverAvailability.ONLINE);
-        userRepository.save(driver);
+        // Make driver available again (only if still eligible); they rejoin the matching
+        // pool at their last reported position, or at the drop-off point
+        releaseDriver(ride.getDriver(), ride.getDropoffLatitude(), ride.getDropoffLongitude());
 
         publishRideEvent(ride, KafkaTopics.RIDE_COMPLETED);
 
@@ -211,11 +223,10 @@ public class RideService {
         ride.setCancelledAt(LocalDateTime.now());
         ride = rideRepository.save(ride);
 
-        // If a driver was assigned, make them available again
+        // If a driver was assigned, make them available again (only if still eligible).
+        // Their position is unknown here unless they reported one during the ride.
         if (ride.getDriver() != null) {
-            User driver = ride.getDriver();
-            driver.setAvailability(DriverAvailability.ONLINE);
-            userRepository.save(driver);
+            releaseDriver(ride.getDriver(), null, null);
         }
 
         publishRideEvent(ride, KafkaTopics.RIDE_CANCELLED);
@@ -259,6 +270,38 @@ public class RideService {
         return rideRepository.findByDriverIdOrderByCreatedAtDesc(driverId).stream()
                 .map(this::toResponseDto)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Releases the assigned driver at the end of a ride (completion or cancellation).
+     *
+     * - Driver no longer BUSY (went OFFLINE, or was rejected/taken offline meanwhile):
+     *   availability is left unchanged.
+     * - Driver suspended or no longer approved: set OFFLINE, never back into the pool.
+     * - Otherwise: set ONLINE and, after commit, put back into the Redis matching pool.
+     */
+    private void releaseDriver(User driver, Double fallbackLatitude, Double fallbackLongitude) {
+        if (driver.getAvailability() != DriverAvailability.BUSY) {
+            return;
+        }
+        if (!driver.isActive() || driver.getApprovalStatus() != DriverApprovalStatus.APPROVED) {
+            driver.setAvailability(DriverAvailability.OFFLINE);
+            userRepository.save(driver);
+            return;
+        }
+
+        driver.setAvailability(DriverAvailability.ONLINE);
+        userRepository.save(driver);
+
+        Long driverId = driver.getId();
+        AfterCommit.run(() -> {
+            try {
+                driverLocationService.rejoinMatchingPool(driverId, fallbackLatitude, fallbackLongitude);
+            } catch (RuntimeException ex) {
+                // The ride change is committed; the driver rejoins on their next location update
+                log.error("Failed to return driver {} to the matching pool", driverId, ex);
+            }
+        });
     }
 
     private void publishRideEvent(Ride ride, String topic) {
