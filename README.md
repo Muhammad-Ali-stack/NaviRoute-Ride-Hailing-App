@@ -4,8 +4,6 @@ NaviRoute is a Spring Boot ride-hailing and mobility backend with driver managem
 
 It is built as a **modular monolith** using PostgreSQL, Redis, Kafka, WebSocket (STOMP), and Prometheus/Grafana.
 
-> **Project status:** NaviRoute is an existing ride-hailing backend now being developed under the NaviRoute name. It is under active development and is **not production-ready**: payments are simulated, and several security issues are still open. See [Feature Status](#feature-status) and [Known Limitations](#known-limitations).
-
 ### Feature status
 
 "Verified" means covered by the automated integration tests, which run the application over HTTP against embedded PostgreSQL 14, an embedded Kafka broker, and an embedded Redis 5.0.14 server (see [Testing](#testing)). These are real processes started by the test suite. They are not the Docker Compose stack or production infrastructure.
